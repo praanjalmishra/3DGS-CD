@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import torch
 
+from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
 # from lightglue import LightGlue, SuperPoint
 # from lightglue.utils import rbd
 from scipy.ndimage import binary_dilation, generate_binary_structure
@@ -25,6 +26,30 @@ def in_image(points2d, H, W):
     in_image_mask = (points2d[..., 0] >= 0) & (points2d[..., 0] < W) & \
         (points2d[..., 1] >= 0) & (points2d[..., 1] < H)
     return in_image_mask
+
+
+def undistort_images(cams, imgs):
+    """
+    Undistort images (Images will become smaller after undistortion)
+
+    Args:
+        cams (NeRFStudio Cameras): Cameras
+        imgs (Nx3xHxW): Images
+
+    Returns:
+        undistorted_imgs (Nx3xH'xW'): Undistorted images
+    """
+    assert cams.device == imgs.device, \
+        f"Cameras on {cams.device} but images on {imgs.device}"
+    imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
+    imgs = [
+        _undistort_image(
+            cams[i], cams[i].distortion_params.numpy(), {}, imgs[i],
+            cams[i].get_intrinsics_matrices().numpy()
+        )[1] for i in range(len(cams))
+    ]
+    imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2)
+    return imgs
 
 
 def dilate_masks(masks, kernel_size=3):
@@ -139,6 +164,7 @@ def points2D_to_point_masks(points2D, valid2D, H, W, kernel_size=3):
         masks.append(mask)
     masks = torch.cat(masks, dim=0)
     return masks.to(points2D.device)
+
 
 def filter_features_with_mask(feats, masks):
     """
