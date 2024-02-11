@@ -4,6 +4,7 @@ import os
 
 from matplotlib import patches
 from mpl_toolkits.mplot3d import Axes3D
+from lightglue import viz2d
 from PIL import Image
 from tqdm import tqdm
 
@@ -84,6 +85,30 @@ def debug_point_cloud(point_cloud, debug_dir):
     ax.set_zlabel('Z')
     plt.savefig(f"{debug_dir}/point_cloud.png")
     plt.close()
+
+
+def debug_matches(imgs1, imgs2, kps1, kps2, matches, debug_dir):
+    assert os.path.isdir(debug_dir)
+    for i, (img1, img2, kp1, kp2, match) in \
+        enumerate(zip(imgs1, imgs2, kps1, kps2, matches)):
+        mkp1, mkp2 = kp1[match[..., 0]], kp2[match[..., 1]]
+        viz2d.plot_images([img1.cpu(), img2.cpu()])
+        viz2d.plot_matches(mkp1, mkp2, color="lime", lw=0.2)
+        viz2d.save_plot(f"{debug_dir}/debug_{i}.png")
+        plt.close()
+
+
+def debug_image_pairs(imgs1, imgs2, debug_dir):
+    """
+    Compare two set of images side by side
+    """
+    assert len(imgs1.shape) == len(imgs2.shape) == 4
+    assert imgs1.shape[1] == imgs2.shape[1] == 3
+    assert os.path.isdir(debug_dir)
+    for idx, (img1, img2) in enumerate(zip(imgs1, imgs2)):
+        viz2d.plot_images([img1.cpu(), img2.cpu()])
+        viz2d.save_plot(f"{debug_dir}/debug_{idx}.png")
+        plt.close()
 
 
 def debug_images(imgs, debug_dir):

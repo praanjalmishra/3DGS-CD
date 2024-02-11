@@ -4,8 +4,8 @@ import numpy as np
 import torch
 
 from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
-# from lightglue import LightGlue, SuperPoint
-# from lightglue.utils import rbd
+from lightglue import LightGlue, SuperPoint
+from lightglue.utils import rbd
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from torchvision.ops import RoIAlign, RoIPool
 from tqdm import tqdm
@@ -189,87 +189,87 @@ def filter_features_with_mask(feats, masks):
     return feats
 
 
-# def image_matching(imgs1, imgs2, masks1=None, masks2=None):
-#     """
-#     Match imgs1 and imgs2 using their respective masks
-#     and return the keypoints and matches.
+def image_matching(imgs1, imgs2, masks1=None, masks2=None):
+    """
+    Match imgs1 and imgs2 using their respective masks
+    and return the keypoints and matches.
 
-#     Parameters:
-#         imgs1, imgs2 (N, 3, H, W): Images
-#         masks1, masks2 (N, 1, H, W or None): Masks
+    Parameters:
+        imgs1, imgs2 (N, 3, H, W): Images
+        masks1, masks2 (N, 1, H, W or None): Masks
 
-#     Returns:
-#         kp_list1 (N-list of M1x2 tensor): Keypoints on image 1
-#         kp_list2 (N-list of M2x2 tensor): Keypoints on image 2
-#         matches_list (N-list of Mx2 tensor): Matched keypoint IDs
-#     """
-#     device = imgs1.device
-#     # Load extractor and matcher modules
-#     extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
-#     matcher = LightGlue(features='superpoint').eval().to(device)
+    Returns:
+        kp_list1 (N-list of M1x2 tensor): Keypoints on image 1
+        kp_list2 (N-list of M2x2 tensor): Keypoints on image 2
+        matches_list (N-list of Mx2 tensor): Matched keypoint IDs
+    """
+    device = imgs1.device
+    # Load extractor and matcher modules
+    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    matcher = LightGlue(features='superpoint').eval().to(device)
 
-#     # Initialize Lists to store results for each pair
-#     kp_list1, kp_list2, matches_list = [], [], []
-#     # Process each image pair individually
-#     for i in range(imgs1.size(0)):
-#         # Extract features
-#         feats1 = extractor.extract(imgs1[i])
-#         feats2 = extractor.extract(imgs2[i])
-#         # Ensure keypoints are within image
-#         feats1["keypoints"].clamp_(min=0)
-#         feats2["keypoints"].clamp_(min=0)
-#         # Filter keypoints using masks
-#         if masks1 is not None:
-#             feats1 = filter_features_with_mask(
-#                 feats1, masks1[i:i+1].to(device)
-#             )
-#         if masks2 is not None:
-#             feats2 = filter_features_with_mask(
-#                 feats2, masks2[i:i+1].to(device)
-#             )
-#         # Match the extracted features
-#         matches = matcher({'image0': feats1, 'image1': feats2})
-#         feats1, feats2, matches = [
-#             rbd(x) for x in [feats1, feats2, matches]
-#         ]
-#         # Append results to lists
-#         kp_list1.append(feats1['keypoints'])
-#         kp_list2.append(feats2['keypoints'])
-#         matches_list.append(matches ['matches'])
-#     return kp_list1, kp_list2, matches_list
+    # Initialize Lists to store results for each pair
+    kp_list1, kp_list2, matches_list = [], [], []
+    # Process each image pair individually
+    for i in range(imgs1.size(0)):
+        # Extract features
+        feats1 = extractor.extract(imgs1[i])
+        feats2 = extractor.extract(imgs2[i])
+        # Ensure keypoints are within image
+        feats1["keypoints"].clamp_(min=0)
+        feats2["keypoints"].clamp_(min=0)
+        # Filter keypoints using masks
+        if masks1 is not None:
+            feats1 = filter_features_with_mask(
+                feats1, masks1[i:i+1].to(device)
+            )
+        if masks2 is not None:
+            feats2 = filter_features_with_mask(
+                feats2, masks2[i:i+1].to(device)
+            )
+        # Match the extracted features
+        matches = matcher({'image0': feats1, 'image1': feats2})
+        feats1, feats2, matches = [
+            rbd(x) for x in [feats1, feats2, matches]
+        ]
+        # Append results to lists
+        kp_list1.append(feats1['keypoints'])
+        kp_list2.append(feats2['keypoints'])
+        matches_list.append(matches ['matches'])
+    return kp_list1, kp_list2, matches_list
 
 
-# def image_align(img1, img2):
-#     """
-#     Align image2 to image1 using homography estimation
+def image_align(img1, img2):
+    """
+    Align image2 to image1 using homography estimation
 
-#     Args:
-#         img1, img2 (1x3xHxW): Images to align
+    Args:
+        img1, img2 (1x3xHxW): Images to align
 
-#     Returns:
-#         img2_aligned (1x3xHxW): Aligned image
-#         align_mask (1x1xHxW): Mask for the aligned image, True for valid pixels
-#     """
-#     H, W = img1.shape[-2:]
-#     # Image alignment to account for slight misalignment
-#     kp1, kp2, matches = image_matching(img1, img2)
-#     assert matches[0].shape[0] > 4, "Need matches>4 to compute homo"
-#     kp1 = kp1[0].cpu().numpy()
-#     kp2 = kp2[0].cpu().numpy()
-#     matches = matches[0].cpu().numpy()
-#     src_pts = np.float32([kp1[m[0]] for m in matches])
-#     dst_pts = np.float32([kp2[m[1]] for m in matches])
-#     M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-#     img2 = img2[0].permute(1, 2, 0).cpu().numpy()
-#     img2_aligned = cv2.warpPerspective(img2, M, (W, H))
-#     img2_aligned = torch.from_numpy(img2_aligned).permute(2, 0, 1).to(img1)
-#     img2_aligned = img2_aligned.unsqueeze(0)
-#     # Mask out the black region in the aligned image
-#     align_mask = np.ones((H, W), dtype=np.uint8)
-#     align_mask = cv2.warpPerspective(align_mask, M, (W, H))
-#     align_mask = torch.from_numpy(align_mask).unsqueeze(0).unsqueeze(0).bool()
-#     align_mask = align_mask.to(img1.device)
-#     return img2_aligned, align_mask
+    Returns:
+        img2_aligned (1x3xHxW): Aligned image
+        align_mask (1x1xHxW): Mask for the aligned image, True for valid pixels
+    """
+    H, W = img1.shape[-2:]
+    # Image alignment to account for slight misalignment
+    kp1, kp2, matches = image_matching(img1, img2)
+    assert matches[0].shape[0] > 4, "Need matches>4 to compute homo"
+    kp1 = kp1[0].cpu().numpy()
+    kp2 = kp2[0].cpu().numpy()
+    matches = matches[0].cpu().numpy()
+    src_pts = np.float32([kp1[m[0]] for m in matches])
+    dst_pts = np.float32([kp2[m[1]] for m in matches])
+    M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    img2 = img2[0].permute(1, 2, 0).cpu().numpy()
+    img2_aligned = cv2.warpPerspective(img2, M, (W, H))
+    img2_aligned = torch.from_numpy(img2_aligned).permute(2, 0, 1).to(img1)
+    img2_aligned = img2_aligned.unsqueeze(0)
+    # Mask out the black region in the aligned image
+    align_mask = np.ones((H, W), dtype=np.uint8)
+    align_mask = cv2.warpPerspective(align_mask, M, (W, H))
+    align_mask = torch.from_numpy(align_mask).unsqueeze(0).unsqueeze(0).bool()
+    align_mask = align_mask.to(img1.device)
+    return img2_aligned, align_mask
 
 
 def batch_crop_resize(

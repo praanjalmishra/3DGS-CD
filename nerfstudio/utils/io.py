@@ -192,3 +192,39 @@ def read_transforms(transforms_json, read_images=True, mode="train", device="cud
         poses, intrinsics, dist_coeffs, H, W
     )
     return images, img_fnames, poses, intrinsics, dist_coeffs, cameras
+
+
+def read_dataset(train_dataset, read_images=True, device="cuda"):
+    """
+    Read images and cameras from NeRFstudio InputDataset
+
+    Args:
+        train_dataset (InputDataset): NeRFStudio InputDataset
+        indices (int-list): Indices for the images and cameras to read
+        read_images (bool): If True, read images, 
+            otherwise only cam params (faster)
+    
+    Returns:
+        images (N, 3, H, W or None): RGB training images
+        poses (N, 4, 4): Camera-to-world poses (OpenCV convention)
+        intrinsics (N, 3, 3): Camera intrinsics
+        dist_coeffs (N, 4): Camera distortion coefficients
+    """
+    if read_images:
+        images = [
+            train_dataset.get_image(i) for i in range(len(train_dataset))
+        ]
+        images = torch.stack(images).to(device).permute(0, 3, 1, 2)
+    else:
+        images = None
+    # Read camera poses
+    cameras = train_dataset.cameras
+    c2w = cameras.camera_to_worlds.to(device)
+    c2w = torch.cat([c2w, torch.zeros(c2w.shape[0], 1, 4).to(c2w)], dim=1)
+    c2w[:, 3, 3] = 1
+    c2w[:, 0:3, 1:3] = -c2w[:, 0:3, 1:3] # OpenGL to OpenCV
+    # Read intrinsics
+    K = cameras.get_intrinsics_matrices().to(device)
+    # Read distortion coefficients
+    dist_params = cameras.distortion_params[:, [0, 1, 4, 5]].to(device)
+    return images, c2w, K, dist_params
