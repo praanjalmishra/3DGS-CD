@@ -43,6 +43,7 @@ def undistort_points(points, intrinsics, dist_coeffs):
     y_pixel = y * f_y + c_y
     return torch.stack([x_pixel, y_pixel], dim=-1)
 
+
 def distort_points(points, intrinsics, dist_coeffs):
     """
     Distort 2D image points
@@ -75,6 +76,36 @@ def distort_points(points, intrinsics, dist_coeffs):
     y_distorted = y_distorted * fy + cy
     points2d = torch.stack((x_distorted, y_distorted), dim=-1)
     return points2d
+
+
+def depths_to_points(pixels, depths, poses, Ks):
+    """
+    Convert depths at sparse pixels to point clouds wrt world frame
+
+    Args:
+        pixels (..., 2): pixel coordinates
+        depths (..., 1): depth values
+        poses (4, 4): Camera-to-world poses
+        Ks (3, 3): Camera intrinsics
+
+    Returns:
+        points (..., 3): sparse point cloud
+    """
+    assert pixels.shape[-1] == 2
+    assert depths.shape[-1] == 1
+    pixels_homo = torch.cat([pixels, torch.ones_like(depths)], dim=-1)
+    cam_coords = torch.einsum(
+        'ij, ...j->...i', torch.inverse(Ks), pixels_homo
+    )
+    cam_3D_coords = cam_coords * depths
+    cam_3D_coords_homo = torch.cat(
+        [cam_3D_coords, torch.ones_like(depths)], dim=-1
+    )
+    world_coords_homo = torch.einsum(
+        "ij, ...j->...i", poses, cam_3D_coords_homo
+    )
+    return world_coords_homo[..., :3]
+
 
 def project_points(points, poses, intrinsics, dist_coeffs, H, W):
     """

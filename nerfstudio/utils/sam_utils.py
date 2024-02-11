@@ -7,9 +7,7 @@ from tqdm import tqdm
 from nerfstudio.utils.debug_utils import debug_bbox_prompts
 
 
-"""Directory to save debug output"""
-debug_dir = "/home/ziqi/Desktop/test/"
-"""Path to MobileSAM weights"""
+"""Path to (Mobile)SAM weights"""
 sam_checkpoint = "/home/ziqi/Packages/Track-Anything/checkpoints/sam_vit_h_4b8939.pth"
 """MobileSAM model type"""
 model_type = "vit_h"

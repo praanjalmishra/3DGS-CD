@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
+from nerfstudio.utils.io import params_to_cameras
 from lightglue import LightGlue, SuperPoint
 from lightglue.utils import rbd
 from scipy.ndimage import binary_dilation, generate_binary_structure
@@ -37,20 +38,47 @@ def undistort_images(cams, imgs):
         imgs (Nx3xHxW): Images
 
     Returns:
+        new_cams (Nx3x3): New cameras
         undistorted_imgs (Nx3xH'xW'): Undistorted images
     """
     assert cams.device == imgs.device, \
         f"Cameras on {cams.device} but images on {imgs.device}"
     imgs = imgs.permute(0, 2, 3, 1).cpu().numpy()
-    imgs = [
+    res = [
         _undistort_image(
             cams[i], cams[i].distortion_params.numpy(), {}, imgs[i],
             cams[i].get_intrinsics_matrices().numpy()
-        )[1] for i in range(len(cams))
+        ) for i in tqdm(range(len(cams)), "Undistort images")
     ]
-    imgs = torch.from_numpy(np.array(imgs)).permute(0, 3, 1, 2)
-    return imgs
+    undist_imgs = [r[1] for r in res]
+    undist_imgs = torch.from_numpy(np.array(undist_imgs)).permute(0, 3, 1, 2)
+    new_Ks = [r[0] for r in res]
+    new_Ks = torch.from_numpy(np.array(new_Ks))
+    new_dist_params = torch.zeros((len(cams), 4))
+    new_poses = cams.camera_to_worlds.clone()
+    new_poses[:, 0:3, 1:3] = -new_poses[:, 0:3, 1:3] # OpenGL to OpenCV
+    H, W = undist_imgs.shape[-2:]
+    new_cams = params_to_cameras(
+        new_poses, new_Ks, new_dist_params, H, W
+    )
+    return new_cams, undist_imgs
 
+
+def extract_depths_at_pixels(pixels, depth):
+    """
+    Extract depth values for pixel coordinates from the depth map.
+
+    Parameters
+        pixels: (N, 3) Pixel coordinates
+        depth: (1, 1, H, W) Depth map of the image
+
+    Returns:
+        depths: (N, 1) Depth values at pixels
+    """
+    assert pixels.shape[-1] == 2
+    pixel_indices = pixels.long()
+    depth_values = depth[0, 0, pixel_indices[:, 1], pixel_indices[:, 0]]
+    return depth_values.reshape(-1, 1)
 
 def dilate_masks(masks, kernel_size=3):
     """
@@ -303,31 +331,31 @@ def batch_crop_resize(
     return op(img, rois)
 
 
-# def get_interest_region(rgbs, masks, iteration=10):
-#     """
-#     Obtain regions of interest for a masked RGB image (iNeRF)
+def get_interest_region(rgbs, masks, iteration=10):
+    """
+    Obtain regions of interest for a masked RGB image (iNeRF)
 
-#     Args:
-#         rgbs (Nx3xHxW): Captured RGB images
-#         masks (Nx1xHxW): Binary masks
-#         iteration (int): Number of dilation iterations
+    Args:
+        rgbs (Nx3xHxW): Captured RGB images
+        masks (Nx1xHxW): Binary masks
+        iteration (int): Number of dilation iterations
 
-#     Returns:
-#         masks_interest (Nx1xHxW): Interest region masks
-#     """
-#     device = rgbs.device
-#     extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    Returns:
+        masks_interest (Nx1xHxW): Interest region masks
+    """
+    device = rgbs.device
+    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
 
-#     masks_interest = torch.zeros_like(masks).to(device)
-#     for ii, (rgb, mask) in enumerate(zip(rgbs, masks)):
-#         feats = extractor.extract(rgb)
-#         # Ensure keypoints are within image
-#         feats["keypoints"].clamp_(min=0)
-#         # Filter out keypoints outside the mask
-#         feats = filter_features_with_mask(feats, mask.unsqueeze(0).to(device))
-#         # Get feature point masks
-#         kpts = feats['keypoints'].squeeze(0).long()
-#         masks_interest[ii, 0, kpts[..., 1], kpts[..., 0]] = 1
-#     # Dilate the feature point masks
-#     masks_interest = dilate_masks(masks_interest, kernel_size=iteration)
-#     return masks_interest
+    masks_interest = torch.zeros_like(masks).to(device)
+    for ii, (rgb, mask) in enumerate(zip(rgbs, masks)):
+        feats = extractor.extract(rgb)
+        # Ensure keypoints are within image
+        feats["keypoints"].clamp_(min=0)
+        # Filter out keypoints outside the mask
+        feats = filter_features_with_mask(feats, mask.unsqueeze(0).to(device))
+        # Get feature point masks
+        kpts = feats['keypoints'].squeeze(0).long()
+        masks_interest[ii, 0, kpts[..., 1], kpts[..., 0]] = 1
+    # Dilate the feature point masks
+    masks_interest = dilate_masks(masks_interest, kernel_size=iteration)
+    return masks_interest
