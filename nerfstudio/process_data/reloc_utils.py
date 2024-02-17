@@ -218,7 +218,8 @@ def localize(
     assert features.exists(), features
 
     cam = pycolmap.Camera(
-        "OPENCV", int(width), int(height), params =[*intrin, *dist_params]
+        model="OPENCV", width=int(width), height=int(height),
+        params =[*intrin, *dist_params]
     )
     queries = [(q, cam) for q in queries]
 
