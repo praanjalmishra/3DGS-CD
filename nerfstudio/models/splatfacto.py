@@ -871,6 +871,13 @@ class SplatfactoModel(Model):
         outs = self.get_outputs(camera.to(self.device))
         return outs  # type: ignore
 
+    def psnr_masked(self, image, rgb, mask):
+        assert mask.dtype == torch.bool
+        masked_psnr = self.psnr(
+            image[mask.expand_as(image)], rgb[mask.expand_as(rgb)]
+        )
+        return masked_psnr
+
     def get_image_metrics_and_images(
         self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
     ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
@@ -909,6 +916,14 @@ class SplatfactoModel(Model):
         # all of these metrics will be logged as scalars
         metrics_dict = {"psnr": float(psnr.item()), "ssim": float(ssim)}  # type: ignore
         metrics_dict["lpips"] = float(lpips)
+
+        if "mask" in batch:
+            mask = batch["mask"].to(self.device)
+            mask = torch.moveaxis(mask, -1, 0)[None, ...]
+            psnr_in = self.psnr_masked(gt_rgb, predicted_rgb, mask)
+            psnr_out = self.psnr_masked(gt_rgb, predicted_rgb, ~mask)
+            metrics_dict["psnr_in"] = float(psnr_in.item())
+            metrics_dict["psnr_out"] = float(psnr_out.item())
 
         images_dict = {"img": combined_rgb}
 
