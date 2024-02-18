@@ -24,13 +24,14 @@ pycolmap_conf = {
 }
 
 
-def colmap_to_opengl(qvec, tvec):
+def colmap_to_transforms_json(qvec, tvec, applied_transform=np.eye(4)[:3, :]):
     """
-    Convert colmap pose to opengl pose
+    Convert colmap pose to transforms.json pose
 
     Args:
         qvec (4-list): quaternion (qw, qx, qy, qz)
         tvec (3-list): translation (x, y, z)
+        applied_transform (3x4)
 
     Returns:
         pose (4x4 array): opengl pose
@@ -40,8 +41,10 @@ def colmap_to_opengl(qvec, tvec):
     pose = np.linalg.inv(pose)
     # Convert from COLMAP's camera coordinate system (OpenCV) to ours (OpenGL)
     pose[0:3, 1:3] *= -1
-    pose = pose[np.array([1, 0, 2, 3]), :]
-    pose[2, :] *= -1
+    applied_transform = np.vstack([applied_transform, [0, 0, 0, 1.0]])
+    pose = applied_transform @ pose
+    # pose = pose[np.array([1, 0, 2, 3]), :]
+    # pose[2, :] *= -1
     return pose
 
 
@@ -195,7 +198,7 @@ def pose_from_cluster(
 def localize(
     reference_sfm, queries, retrieval_dict, features, match_dict,
     ransac_thresh=12, width=1024, height=1024, intrin=[1422, 1422, 512, 512],
-    dist_params=[0.0, 0.0, 0.0, 0.0]
+    dist_params=[0.0, 0.0, 0.0, 0.0], applied_transform=np.eye(4)[:3, :]
 ):
     """
     Camera localization for sparse view images w/ SolvePnP + RANSAC
@@ -211,6 +214,7 @@ def localize(
         height (int): image height
         intrin (4-list): camera intrinsics (fx, fy, cx, cy)
         dist_params (4-list): camera distortion params (k1, k2, p1, p2)
+        applied_transform (3x4): applied transform for transform.json
 
     Returns:
         poses (list): camera poses (4x4 arrays)
@@ -260,7 +264,7 @@ def localize(
     res = {}
     for q in poses:
         qvec, tvec = poses[q]
-        pose = colmap_to_opengl(qvec, tvec)
+        pose = colmap_to_transforms_json(qvec, tvec, applied_transform)
         name = q.split("/")[-1]
         res[name] = pose
     return res
@@ -288,8 +292,27 @@ def read_cam_params_from_json(transforms_json):
     )
 
 
+def read_applied_transform_from_json(transforms_json):
+    """
+    Read applied transform from transforms.json
+
+    Args:
+        transforms_json (Path or str): path to transforms.json
+
+    Returns:
+        applied_transform (3x4 array): applied transform
+    """
+    transforms_json = Path(transforms_json)
+    with open(transforms_json, 'r') as infile:
+        data = json.load(infile)
+    if "applied_transform" not in data:
+        return np.eye(4)[:3, :]
+    return np.array(data["applied_transform"])
+
+
 def save_poses(
-    poses, json_path, width, height, intrin, dist_params, prefix="rgb_new"
+    poses, json_path, width, height, intrin, dist_params, prefix="rgb_new",
+    applied_transform=np.eye(4)[:3, :]
 ):
     """
     Save estimated camera poses to transforms.json
@@ -344,6 +367,7 @@ def camloc(
         read_cam_params_from_json(transforms_json)
     intrin = [fx, fy, cx, cy]
     dist_params = [k1, k2, p1, p2]
+    applied_transform = read_applied_transform_from_json(transforms_json)
     # --- Read the reference 3D reconstruction ---
     ref_sfm = pycolmap.Reconstruction(ref_sfm_dir / "sparse" / "0")
     # --- Extract local and global features from query images --- 
@@ -376,7 +400,8 @@ def camloc(
     poses = localize(
         ref_sfm, query_imgs, loc_pairs, query_img_dir / "features.h5",
         loc_matches, ransac_thresh=ransac_thresh,
-        width=width, height=height, intrin=intrin
+        width=width, height=height, intrin=intrin,
+        applied_transform=applied_transform
     )
     for f in query_img_dir.iterdir():  # Delete extracted feature files
         if f.suffix == ".h5":
@@ -384,7 +409,7 @@ def camloc(
     # Save poses to transforms.json
     save_poses(
         poses, query_img_dir / "transforms.json",
-        width, height, intrin, dist_params
+        width, height, intrin, dist_params, applied_transform=applied_transform
     )
     return poses
 
