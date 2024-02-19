@@ -154,6 +154,61 @@ def add_mask_path(json_file, output_file):
         json.dump(data, file, indent=4)
 
 
+def add_depth_path(json_file, output_file):
+    """
+    Add the depth paths to transforms.json.
+
+    Args:
+        json_file: Input transforms.json file.
+        output_file: Path to the output json file.
+    """
+    with open(json_file, 'r') as file:
+        data = json.load(file)
+
+    has_depth_path = True
+    for frame in data['frames']:
+        if 'depth_file_path' not in frame:
+            has_depth_path = False
+            file_id = extract_last_number(frame['file_path'])
+            if 'rgb_new' in frame['file_path']:
+                depth_folder = 'depths_new'
+            elif "rgb" in frame["file_path"]:
+                depth_folder = 'depths'
+            else:
+                raise ValueError(
+                    f"Expect rgb img filename to be rgb/frame_xxxxx.png " +
+                    f" but got {frame['file_path']}"
+                )
+            depth_filename = f'depth_{file_id:05g}.png'
+            frame['depth_file_path'] = os.path.join(depth_folder, depth_filename)
+    
+    if has_depth_path:
+        print("Warning: All frames already have a mask_path.")
+
+    # Write the updated JSON data back to the new file
+    with open(output_file, 'w') as file:
+        json.dump(data, file, indent=4)
+
+
+def remove_depth_path(json_file, output_file):
+    """
+    Remove the depth paths from transforms.json.
+
+    Args:
+        json_file: Input transforms.json file.
+        output_file: Path to the output json file.
+    """
+    with open(json_file, 'r') as file:
+        data = json.load(file)
+
+    for frame in data['frames']:
+        frame.pop('depth_file_path', None)
+
+    # Write the updated JSON data back to the new file
+    with open(output_file, 'w') as file:
+        json.dump(data, file, indent=4)
+
+
 def change_new_view_indices(json_file, output_file, new_view_indices):
     """
     Change the indices of new views in transforms.json.
@@ -227,6 +282,8 @@ if __name__ == '__main__':
     parser.add_argument('--out', "-o", type=str, required=True)
     parser.add_argument('--remove_masks', "-rm", action='store_true')
     parser.add_argument('--add_masks', "-am", action='store_true')
+    parser.add_argument('--add_depth', "-ad", action='store_true')
+    parser.add_argument('--remove_depth', "-rd", action='store_true')
     parser.add_argument("--eval_new", "-en", action='store_true')
     parser.add_argument("--eval_old", "-eo", action='store_true')
     parser.add_argument("--eval_all_pix", "-ea", action='store_true')
@@ -243,6 +300,12 @@ if __name__ == '__main__':
     
     if args.add_masks:
         add_mask_path(args.json, args.out)
+
+    if args.add_depth:
+        add_depth_path(args.json, args.out)
+
+    if args.remove_depth:
+        remove_depth_path(args.json, args.out)
 
     if args.eval_new:
         assert not args.eval_old, \
