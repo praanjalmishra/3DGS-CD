@@ -680,3 +680,17 @@ def save_mask(
         cv2.imwrite(str(mask_path_i), mask_i)
     CONSOLE.log(":tada: Generated and saved masks.")
     return mask_path / "mask.png"
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Process data for nerfstudio.")
+    parser.add_argument("-i", "--img_dir", type=str, required=True)
+    parser.add_argument("-n", "--num_downscales", type=int, default=0)
+
+    args = parser.parse_args()
+
+    img_dir = Path(args.img_dir)
+    assert img_dir.exists()
+
+    downscale_images(img_dir, args.num_downscales)
