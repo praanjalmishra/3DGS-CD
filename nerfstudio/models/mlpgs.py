@@ -36,7 +36,7 @@ from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.engine.optimizers import Optimizers
 from nerfstudio.field_components.spatial_distortions import SceneContraction
-from nerfstudio.fields.opacity_fields import HashMLPOpacityField
+from nerfstudio.fields.opacity_fields import HashMLPOpacityField, HashMLPColorField
 from nerfstudio.model_components import losses, renderers
 from nerfstudio.models.splatfacto import (RGB2SH, SplatfactoModel,
                                           SplatfactoModelConfig,
@@ -75,32 +75,37 @@ class MLPGSModel(SplatfactoModel):
         avg_dist = distances.mean(dim=-1, keepdim=True)
         self.scales = torch.nn.Parameter(torch.log(avg_dist.repeat(1, 3)))
         self.quats = torch.nn.Parameter(random_quat_tensor(self.num_points))
-        dim_sh = num_sh_bases(self.config.sh_degree)
+        # dim_sh = num_sh_bases(self.config.sh_degree)
 
-        if (
-            self.seed_points is not None
-            and not self.config.random_init
-            # We can have colors without points.
-            and self.seed_points[1].shape[0] > 0
-        ):
-            shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
-            if self.config.sh_degree > 0:
-                shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
-                shs[:, 1:, 3:] = 0.0
-            else:
-                CONSOLE.log("use color only optimization with sigmoid activation")
-                shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
-            self.features_dc = torch.nn.Parameter(shs[:, 0, :])
-            self.features_rest = torch.nn.Parameter(shs[:, 1:, :])
-        else:
-            self.features_dc = torch.nn.Parameter(torch.rand(self.num_points, 3))
-            self.features_rest = torch.nn.Parameter(torch.zeros((self.num_points, dim_sh - 1, 3)))
+        # if (
+        #     self.seed_points is not None
+        #     and not self.config.random_init
+        #     # We can have colors without points.
+        #     and self.seed_points[1].shape[0] > 0
+        # ):
+        #     shs = torch.zeros((self.seed_points[1].shape[0], dim_sh, 3)).float().cuda()
+        #     if self.config.sh_degree > 0:
+        #         shs[:, 0, :3] = RGB2SH(self.seed_points[1] / 255)
+        #         shs[:, 1:, 3:] = 0.0
+        #     else:
+        #         CONSOLE.log("use color only optimization with sigmoid activation")
+        #         shs[:, 0, :3] = torch.logit(self.seed_points[1] / 255, eps=1e-10)
+        #     self.features_dc = torch.nn.Parameter(shs[:, 0, :])
+        #     self.features_rest = torch.nn.Parameter(shs[:, 1:, :])
+        # else:
+        #     self.features_dc = torch.nn.Parameter(torch.rand(self.num_points, 3))
+        #     self.features_rest = torch.nn.Parameter(torch.zeros((self.num_points, dim_sh - 1, 3)))
 
         # self.opacities = torch.nn.Parameter(torch.logit(0.1 * torch.ones(self.num_points, 1)))
         self.opacity_field = HashMLPOpacityField(
             aabb=torch.tensor([[-1, -1, -1], [1, 1, 1]]),
             spatial_distortion=SceneContraction(order=float("inf")),
             num_layers=2, 
+        )
+        self.color_field = HashMLPColorField(
+            aabb=torch.tensor([[-1, -1, -1], [1, 1, 1]]),
+            spatial_distortion=SceneContraction(order=float("inf")),
+            num_layers=2,
         )
 
         # metrics
@@ -120,6 +125,20 @@ class MLPGSModel(SplatfactoModel):
             )  # This color is the same as the default background color in Viser. This would only affect the background color when rendering.
         else:
             self.background_color = get_color(self.config.background_color)
+
+    @property
+    def colors(self):
+        # viewdirs = self.means.detach() - camera.camera_to_worlds.detach()[..., :3, 3]
+        # colors = self.color_field.get_color(self.means, viewdirs)
+        return None
+
+    @property
+    def shs_0(self):
+        return None
+
+    @property
+    def shs_rest(self):
+        return None
 
     def refinement_after(self, optimizers: Optimizers, step):
         assert step == self.step
@@ -147,8 +166,6 @@ class MLPGSModel(SplatfactoModel):
                 nsamps = self.config.n_split_samples
                 (
                     split_means,
-                    split_features_dc,
-                    split_features_rest,
                     split_scales,
                     split_quats,
                 ) = self.split_gaussians(splits, nsamps)
@@ -157,29 +174,19 @@ class MLPGSModel(SplatfactoModel):
                 dups &= high_grads
                 (
                     dup_means,
-                    dup_features_dc,
-                    dup_features_rest,
                     dup_scales,
                     dup_quats,
                 ) = self.dup_gaussians(dups)
-                self.means = Parameter(torch.cat([self.means.detach(), split_means, dup_means], dim=0))
-                self.features_dc = Parameter(
+                self.means = Parameter(
                     torch.cat(
-                        [self.features_dc.detach(), split_features_dc, dup_features_dc],
-                        dim=0,
+                        [self.means.detach(), split_means, dup_means], dim=0
                     )
                 )
-                self.features_rest = Parameter(
+                self.scales = Parameter(
                     torch.cat(
-                        [
-                            self.features_rest.detach(),
-                            split_features_rest,
-                            dup_features_rest,
-                        ],
-                        dim=0,
+                        [self.scales.detach(), split_scales, dup_scales], dim=0
                     )
                 )
-                self.scales = Parameter(torch.cat([self.scales.detach(), split_scales, dup_scales], dim=0))
                 self.quats = Parameter(torch.cat([self.quats.detach(), split_quats, dup_quats], dim=0))
                 # append zeros to the max_2Dsize tensor
                 self.max_2Dsize = torch.cat(
@@ -245,7 +252,8 @@ class MLPGSModel(SplatfactoModel):
         """
         n_bef = self.num_points
         # cull transparent ones
-        culls = (self.opacity_field.get_opacity(self.means) < self.config.cull_alpha_thresh).squeeze()
+        opacities = self.opacity_field.get_opacity(self.means)
+        culls = (opacities < self.config.cull_alpha_thresh).squeeze()
         below_alpha_count = torch.sum(culls).item()
         toobigs_count = 0
         if extra_cull_mask is not None:
@@ -262,8 +270,6 @@ class MLPGSModel(SplatfactoModel):
         self.means = Parameter(self.means[~culls].detach())
         self.scales = Parameter(self.scales[~culls].detach())
         self.quats = Parameter(self.quats[~culls].detach())
-        self.features_dc = Parameter(self.features_dc[~culls].detach())
-        self.features_rest = Parameter(self.features_rest[~culls].detach())
 
         CONSOLE.log(
             f"Culled {n_bef - self.num_points} gaussians "
@@ -287,9 +293,6 @@ class MLPGSModel(SplatfactoModel):
         rots = quat_to_rotmat(quats.repeat(samps, 1))  # how these scales are rotated
         rotated_samples = torch.bmm(rots, scaled_samples[..., None]).squeeze()
         new_means = rotated_samples + self.means[split_mask].repeat(samps, 1)
-        # step 2, sample new colors
-        new_features_dc = self.features_dc[split_mask].repeat(samps, 1)
-        new_features_rest = self.features_rest[split_mask].repeat(samps, 1, 1)
         # step 4, sample new scales
         size_fac = 1.6
         new_scales = torch.log(torch.exp(self.scales[split_mask]) / size_fac).repeat(samps, 1)
@@ -298,8 +301,6 @@ class MLPGSModel(SplatfactoModel):
         new_quats = self.quats[split_mask].repeat(samps, 1)
         return (
             new_means,
-            new_features_dc,
-            new_features_rest,
             new_scales,
             new_quats,
         )
@@ -311,14 +312,10 @@ class MLPGSModel(SplatfactoModel):
         n_dups = dup_mask.sum().item()
         CONSOLE.log(f"Duplicating {dup_mask.sum().item()/self.num_points} gaussians: {n_dups}/{self.num_points}")
         dup_means = self.means[dup_mask]
-        dup_features_dc = self.features_dc[dup_mask]
-        dup_features_rest = self.features_rest[dup_mask]
         dup_scales = self.scales[dup_mask]
         dup_quats = self.quats[dup_mask]
         return (
             dup_means,
-            dup_features_dc,
-            dup_features_rest,
             dup_scales,
             dup_quats,
         )
@@ -392,22 +389,24 @@ class MLPGSModel(SplatfactoModel):
             1,
         )
         opacities = self.opacity_field.get_opacity(self.means)
+
         if crop_ids is not None:
             opacities_crop = opacities[crop_ids]
             means_crop = self.means[crop_ids]
-            features_dc_crop = self.features_dc[crop_ids]
-            features_rest_crop = self.features_rest[crop_ids]
+            # features_dc_crop = self.features_dc[crop_ids]
+            # features_rest_crop = self.features_rest[crop_ids]
             scales_crop = self.scales[crop_ids]
             quats_crop = self.quats[crop_ids]
         else:
             opacities_crop = opacities
             means_crop = self.means
-            features_dc_crop = self.features_dc
-            features_rest_crop = self.features_rest
+            # features_dc_crop = self.features_dc
+            # features_rest_crop = self.features_rest
             scales_crop = self.scales
             quats_crop = self.quats
 
-        colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
+        viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]
+        rgbs = self.color_field.get_color(means_crop, viewdirs)
 
         self.xys, depths, self.radii, conics, num_tiles_hit, cov3d = project_gaussians(  # type: ignore
             means_crop,
@@ -435,14 +434,14 @@ class MLPGSModel(SplatfactoModel):
             if self.xys.requires_grad:
                 self.xys.retain_grad()
 
-        if self.config.sh_degree > 0:
-            viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
-            viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
-            n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
-            rgbs = spherical_harmonics(n, viewdirs, colors_crop)
-            rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
-        else:
-            rgbs = torch.sigmoid(colors_crop[:, 0, :])
+        # if self.config.sh_degree > 0:
+        #     viewdirs = means_crop.detach() - camera.camera_to_worlds.detach()[..., :3, 3]  # (N, 3)
+        #     viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
+        #     n = min(self.step // self.config.sh_degree_interval, self.config.sh_degree)
+        #     rgbs = spherical_harmonics(n, viewdirs, colors_crop)
+        #     rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
+        # else:
+        #     rgbs = torch.sigmoid(colors_crop[:, 0, :])
 
         # rescale the camera back to original dimensions
         camera.rescale_output_resolution(camera_downscale)
@@ -498,17 +497,15 @@ class MLPGSModel(SplatfactoModel):
         self.means = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
         self.scales = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
         self.quats = torch.nn.Parameter(torch.zeros(newp, 4, device=self.device))
-        self.features_dc = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
-        self.features_rest = torch.nn.Parameter(
-            torch.zeros(newp, num_sh_bases(self.config.sh_degree) - 1, 3, device=self.device)
-        )
+        # self.features_dc = torch.nn.Parameter(torch.zeros(newp, 3, device=self.device))
+        # self.features_rest = torch.nn.Parameter(
+        #     torch.zeros(newp, num_sh_bases(self.config.sh_degree) - 1, 3, device=self.device)
+        # )
         super().load_state_dict(dict, **kwargs)
 
     def get_gaussian_param_groups(self) -> Dict[str, List[Parameter]]:
         return {
             "xyz": [self.means],
-            "features_dc": [self.features_dc],
-            "features_rest": [self.features_rest],
             "scaling": [self.scales],
             "rotation": [self.quats],
         }
@@ -521,6 +518,7 @@ class MLPGSModel(SplatfactoModel):
         """
         gps = self.get_gaussian_param_groups()
         gps["opacity_mlp"] = list(self.opacity_field.parameters())
+        gps["color_mlp"] = list(self.color_field.parameters())
         return gps
 
     def get_image_metrics_and_images(
