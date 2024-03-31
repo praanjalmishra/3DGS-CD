@@ -22,6 +22,7 @@ import os
 import torch
 from pathlib import Path
 from PIL import Image
+from tqdm import tqdm
 from nerfstudio.cameras.cameras import Cameras
 
 
@@ -45,7 +46,7 @@ def write_to_json(filename: Path, content: dict):
     """
     assert filename.suffix == ".json"
     with open(filename, "w", encoding="UTF-8") as file:
-        json.dump(content, file)
+        json.dump(content, file, indent=4)
 
 
 def read_imgs(paths, device='cpu'):
@@ -75,6 +76,21 @@ def read_imgs(paths, device='cpu'):
     return imgs
 
 
+def save_imgs(imgs, paths):
+    """
+    Save images to img paths
+
+    Args:
+        imgs (N, 3, H, W): RGB images
+        paths (N-str-list): Image paths
+    """
+    assert len(imgs.shape) == 4 and imgs.shape[1] == 3
+    assert len(imgs) == len(paths)
+    for img, path in tqdm(zip(imgs, paths), desc="Saving images"):
+        img = (img.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        img = Image.fromarray(img).save(path)
+
+
 def read_masks(paths, device='cpu'):
     """
     Read masks from img paths
@@ -95,6 +111,22 @@ def read_masks(paths, device='cpu'):
         masks.append(mask)
     masks = torch.stack(masks).to(device)
     return masks
+
+
+def save_masks(masks, paths):
+    """
+    Save masks to img paths
+
+    Args:
+        masks (N, 1, H, W): Masks
+        paths (N-str-list): Image paths
+    """
+    assert len(masks.shape) == 4 and masks.shape[1] == 1
+    assert len(masks) == len(paths)
+    for mask, path in tqdm(zip(masks, paths), desc="Saving masks"):
+        mask = mask.squeeze(0).cpu().numpy() * 255
+        mask = Image.fromarray(mask.astype(np.uint8))
+        mask.save(path)
 
 
 def params_to_cameras(poses, intrinsics, dist_coeffs, H, W):
