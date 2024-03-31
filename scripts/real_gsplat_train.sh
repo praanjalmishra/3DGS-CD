@@ -24,8 +24,7 @@ KUBRIC_FOLDER=${5:-"/home/ziqi/Packages/kubric"}
 NERFSTUDIO_FOLDER=${6:-"/home/ziqi/Packages/nerfstudio"}
 MERGE_SCRIPT=${7:-"/home/ziqi/Packages/nerfstudio/scripts/merge_colmap_data.py"}
 EDIT_SCRIPT=${8:-"/home/ziqi/Packages/nerfstudio/scripts/edit_nerf_data.py"}
-CAM_PATH=${9:-"/home/ziqi/Packages/nerfstudio/scripts/cam_path_single.json"}
-CAM_PATH_VIDEO=${10:-"/home/ziqi/Packages/nerfstudio/scripts/cam_path_video.json"}
+UNDISTORT_SCRIPT=${9:-"/home/ziqi/Packages/nerfstudio/scripts/undistort_transforms.py"}
 
 
 # ------------------ Setup Environment ------------------
@@ -89,6 +88,18 @@ then
   echo "Colmap data conversion successful."
 else
   echo "Colmap data conversion failed." >&2
+  exit 1
+fi
+
+# Undistort images
+python $UNDISTORT_SCRIPT -s ${DATA_FOLDER}
+
+# check if the previous command was successful
+if [ $? -eq 0 ]
+then
+  echo "Undistort images successful"
+else
+  echo "Undistort images failed." >&2
   exit 1
 fi
 
