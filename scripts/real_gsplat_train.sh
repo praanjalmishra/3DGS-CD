@@ -117,3 +117,33 @@ else
   echo "Add mask paths failed." >&2
   exit 1
 fi
+
+
+# ------------------ Pre-Training ------------------
+while true; do
+  # Pre-trained NeRF: Train NeRFacto for the object-centric scene
+  ns-train splatfacto --vis viewer+tensorboard \
+    --experiment-name $(basename $DATA_FOLDER) \
+    --output-dir ${OUTPUT_FOLDER} \
+    --timestamp $current_time \
+    --steps_per_eval_all_images 1000 \
+    --pipeline.model.cull_alpha_thresh 0.005 \
+    --pipeline.model.continue_cull_post_densification=False \
+    --max-num-iterations 30000 \
+    --machine.num-devices 1 \
+    --viewer.quit-on-train-completion True \
+    nerfstudio-data --data ${DATA_FOLDER}/transforms_pretrain.json \
+    --auto-scale-poses=False --center-method none --orientation-method none \
+    --load-3D-points True \
+    --train_split_fraction 0.9
+
+  # check if the previous command was successful
+  if [ $? -ne 0 ]; then
+    echo "Training $(basename ${DATA_FOLDER}) failed." >&2
+    continue
+  fi
+
+  # If we reach here, pre-training was successful
+  break
+
+done
