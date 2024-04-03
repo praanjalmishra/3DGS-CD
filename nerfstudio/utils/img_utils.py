@@ -217,7 +217,7 @@ def filter_features_with_mask(feats, masks):
     return feats
 
 
-def image_matching(imgs1, imgs2, masks1=None, masks2=None):
+def image_matching(imgs1, imgs2, masks1=None, masks2=None, flip=False):
     """
     Match imgs1 and imgs2 using their respective masks
     and return the keypoints and matches.
@@ -225,6 +225,7 @@ def image_matching(imgs1, imgs2, masks1=None, masks2=None):
     Parameters:
         imgs1, imgs2 (N, 3, H, W): Images
         masks1, masks2 (N, 1, H, W or None): Masks
+        flip (bool): Flip images in case img match is sensitive to rotation
 
     Returns:
         kp_list1 (N-list of M1x2 tensor): Keypoints on image 1
@@ -235,6 +236,15 @@ def image_matching(imgs1, imgs2, masks1=None, masks2=None):
     # Load extractor and matcher modules
     extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
     matcher = LightGlue(features='superpoint').eval().to(device)
+
+    if flip:
+        # Rotate images by 180 degrees if flip is True
+        imgs1 = torch.flip(imgs1, [2, 3])
+        if masks1 is not None:
+            masks1 = torch.flip(masks1, [2, 3])
+
+    from nerfstudio.utils.debug_utils import debug_images
+    debug_images(imgs1, "/home/ziqi/Desktop/test/")
 
     # Initialize Lists to store results for each pair
     kp_list1, kp_list2, matches_list = [], [], []
@@ -260,6 +270,10 @@ def image_matching(imgs1, imgs2, masks1=None, masks2=None):
         feats1, feats2, matches = [
             rbd(x) for x in [feats1, feats2, matches]
         ]
+        if flip:
+            H, W = imgs1.shape[2], imgs1.shape[3]
+            feats1['keypoints'][:, 0] = W - feats1['keypoints'][:, 0] - 1
+            feats1['keypoints'][:, 1] = H - feats1['keypoints'][:, 1] - 1
         # Append results to lists
         kp_list1.append(feats1['keypoints'])
         kp_list2.append(feats2['keypoints'])
