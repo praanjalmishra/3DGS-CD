@@ -1,12 +1,15 @@
 # 2D image and mask operation functions
 import cv2
 import numpy as np
+import os
 import torch
 
-from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
-from nerfstudio.utils.io import params_to_cameras
+from glob import glob
 from lightglue import LightGlue, SuperPoint
 from lightglue.utils import rbd
+from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
+from nerfstudio.utils.io import params_to_cameras
+from PIL import Image, ImageOps
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from torchvision.ops import RoIAlign, RoIPool
 from tqdm import tqdm
@@ -101,6 +104,24 @@ def dilate_masks(masks, kernel_size=3):
         dilated_masks_np.append(dilated_mask_np)
     dilated_masks = torch.from_numpy(np.array(dilated_masks_np)).to(masks)
     return dilated_masks.unsqueeze(1)
+
+
+def invert_mask(mask_file, output_file):
+    """Invert colors of a mask image.
+
+    Args:
+      mask_file: String, path to the mask image.
+      output_file: String, path to the output mask image.
+    """
+
+    # Load the mask image
+    mask = Image.open(mask_file)
+
+    # Invert the colors of the mask image
+    inverted_mask = ImageOps.invert(mask)
+
+    # Save the inverted mask
+    inverted_mask.save(output_file)
 
 
 def masks_to_focus(masks, kernel_ratio=0.15):
@@ -340,6 +361,33 @@ def batch_crop_resize(
     else:
         raise ValueError(f"Wrong interpolation type: {interpolation}")
     return op(img, rois)
+
+
+def rgb2rgba(rgb_folder, mask_folder, output_folder):
+    # Ensure output folder exists
+    assert os.path.isdir(output_folder), "Output folder does not exist"
+    rgb_img_files = sorted(glob(os.path.join(rgb_folder, "*.png")))
+    mask_img_files = sorted(glob(os.path.join(mask_folder, "*.png")))
+
+    # Iterate through all images in the RGB folder
+    for rgb_img_path, mask_img_path in tqdm(zip(rgb_img_files, mask_img_files), desc="RGB2RGBA"):
+        # Load the RGB(A) image and its corresponding mask
+        rgb_image = Image.open(rgb_img_path).convert("RGBA")
+        mask_image = Image.open(mask_img_path).convert("L")
+
+        # Prepare the new alpha channel
+        # Note: mask image is assumed to be in grayscale ('L' mode)
+        # Convert mask to 'L' mode if it's not, ensuring compatibility
+        alpha_channel = mask_image.point(lambda p: 255 if p > 0 else 0)
+
+        # Combine original RGB channels with the new alpha channel
+        rgb_channels = rgb_image.split()[:3]  # Ignore existing alpha if present
+        new_image = Image.merge("RGBA", rgb_channels + (alpha_channel,))
+
+        # Save the modified image
+        rgb_img_basename = os.path.basename(rgb_img_path)
+        output_path = os.path.join(output_folder, rgb_img_basename)
+        new_image.save(output_path)
 
 
 def get_interest_region(rgbs, masks, iteration=10):

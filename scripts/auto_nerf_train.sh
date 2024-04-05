@@ -28,7 +28,7 @@ CAM_PATH_VIDEO=${12:-"/home/ziqi/Packages/nerfstudio/scripts/cam_path_video.json
 # ------------------ Generate the data ------------------
 # May need to build a conda env with dependencies required by the .py scripts
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate nerftest
+conda activate nerfgs
 
 # Generate synthetic data for an object-centric scene
 cd $KUBRIC_FOLDER
@@ -171,7 +171,7 @@ fi
 # ------------------ Train NeRFacto ------------------
 
 cd $NERFSTUDIO_FOLDER
-conda activate nerftest
+conda activate nerfgs
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
 
 current_time=$(date +%Y-%m-%d_%H%M%S)
