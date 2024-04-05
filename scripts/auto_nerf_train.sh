@@ -178,15 +178,13 @@ current_time=$(date +%Y-%m-%d_%H%M%S)
 
 while true; do
   # Pre-trained NeRF: Train NeRFacto for the object-centric scene
-  ns-train nerfacto --vis viewer+tensorboard \
+  ns-train splatfacto --vis viewer+tensorboard \
     --experiment-name hdri${HDRI_ID}_${OBJECT_TYPE} \
     --output-dir ${OUTPUT_FOLDER} \
     --timestamp $current_time \
-    --steps_per_eval_all_images 500 \
-    --pipeline.datamanager.train-num-rays-per-batch 4096 \
-    --pipeline.datamanager.camera-optimizer.mode off \
-    --pipeline.model.use_appearance_embedding=False \
-    --pipeline.model.use_gradient_scaling True \
+    --steps_per_eval_all_images 1000 \
+    --pipeline.model.cull_alpha_thresh 0.005 \
+    --pipeline.model.continue_cull_post_densification=False \
     --max-num-iterations 30000 \
     --machine.num-devices 1 \
     --viewer.quit-on-train-completion True \

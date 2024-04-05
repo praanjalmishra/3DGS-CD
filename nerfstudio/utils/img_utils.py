@@ -243,9 +243,6 @@ def image_matching(imgs1, imgs2, masks1=None, masks2=None, flip=False):
         if masks1 is not None:
             masks1 = torch.flip(masks1, [2, 3])
 
-    from nerfstudio.utils.debug_utils import debug_images
-    debug_images(imgs1, "/home/ziqi/Desktop/test/")
-
     # Initialize Lists to store results for each pair
     kp_list1, kp_list2, matches_list = [], [], []
     # Process each image pair individually
