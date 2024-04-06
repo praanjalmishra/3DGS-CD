@@ -1,44 +1,40 @@
 # 3DGS-based change detection
 import argparse
-import cv2
 import json
-import numpy as np
 import os
-import pycolmap
 import re
 import statistics
-import torch
-
-from lightglue import viz2d
 from pathlib import Path
+
+import cv2
+import numpy as np
+import pycolmap
+import torch
+from lightglue import viz2d
 from matplotlib import pyplot as plt
+from pyquaternion import Quaternion
+from tqdm import tqdm
+
 from nerfstudio.cameras.camera_paths import get_path_from_json
 from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
-from nerfstudio.utils.debug_utils import (
-    debug_masks, debug_images, debug_image_pairs, debug_matches
-)
+from nerfstudio.utils.debug_utils import (debug_image_pairs, debug_images,
+                                          debug_masks, debug_matches)
 from nerfstudio.utils.eval_utils import eval_setup
-from nerfstudio.utils.img_utils import (
-    undistort_images, image_align, image_matching, extract_depths_at_pixels
-)
-from nerfstudio.utils.io import (
-    read_imgs, read_dataset, read_transforms, save_masks
-)
+from nerfstudio.utils.img_utils import (extract_depths_at_pixels, image_align,
+                                        image_matching, undistort_images)
+from nerfstudio.utils.io import (read_dataset, read_imgs, read_transforms,
+                                 save_masks)
 from nerfstudio.utils.obj_3d_seg import Object3DSeg
-from nerfstudio.utils.pcd_utils import (
-    compute_point_cloud, point_cloud_filtering, compute_3D_bbox, expand_3D_bbox
-)
-from nerfstudio.utils.proj_utils import (
-    undistort_points, project_points, depths_to_points, proj_check_3D_points
-)
+from nerfstudio.utils.pcd_utils import (compute_3D_bbox, compute_point_cloud,
+                                        expand_3D_bbox, point_cloud_filtering)
+from nerfstudio.utils.proj_utils import (depths_to_points,
+                                         proj_check_3D_points, project_points,
+                                         undistort_points)
 from nerfstudio.utils.render_utils import render_cameras
-from nerfstudio.utils.sam_utils import (
-    sam_embedding, sam_predict, sam_refine_masks,
-    expand_2D_bbox, compute_2D_bbox
-)
-from pyquaternion import Quaternion
-from tqdm import tqdm
+from nerfstudio.utils.sam_utils import (compute_2D_bbox, expand_2D_bbox,
+                                        sam_embedding, sam_predict,
+                                        sam_refine_masks)
 
 
 class ChangeDet:
@@ -261,8 +257,8 @@ class ChangeDet:
             assert json_path.exists(), f"{json_path} does not exist"
             with open(json_path, "r") as f:
                 configs = json.load(f)
-        # if not self.output_dir.exists():
-        #     self.output_dir.mkdir(parents=True)
+
+        assert self.output_dir.exists(), f"{self.output_dir} does not exist"
 
         # Load pre-trained 3DGS
         assert os.path.isfile(self.load_config)
@@ -270,6 +266,267 @@ class ChangeDet:
             self.load_config, test_mode="inference"
         )
 
+        device = self.device
+        # ----------------------------Load data -------------------------------
+        # Load pre-training images and camera info + new images and camera info
+        if transforms_json is not None:
+            color_images, img_fnames, c2w, K, dist_params, cameras = \
+                read_transforms(transforms_json)
+            # Undistort images
+            assert dist_params.sum() < 1e-6, \
+                "All images must be undistorted before change detection"
+            sparse_view_file_ids, train_file_ids = [], []
+            sparse_view_indices, pretrain_indices = [], []
+            for ii, path in enumerate(img_fnames):
+                id_str = re.search(r'(\d+)(?!.*\d)', path.name)
+                if not id_str:
+                    raise ValueError("Train filenames must contain numbers")
+                if "rgb_new" in path.as_posix():
+                    sparse_view_file_ids.append(int(id_str.group()))
+                    sparse_view_indices.append(ii)
+                else:
+                    pretrain_indices.append(ii)
+                train_file_ids.append(int(id_str.group()))
+
+            N, _, H, W = color_images.shape
+            # Get sparse-view captured images
+            rgbs_captured_sparse_view = \
+                color_images[sparse_view_indices].to(device)
+
+        else: # hardcode sparse view indices
+            # TODO: Remove the hard-coded GT input between the lines
+            num_images, split_fraction = 200, 0.9
+            num_train_images = int(np.ceil(num_images * split_fraction))
+            train_file_ids = np.linspace(
+                0, num_images-1, num_train_images, dtype=int
+            ).tolist()
+            sparse_view_file_ids = [80, 85, 90, 95]
+            sparse_view_indices = [
+                train_file_ids.index(ii) for ii in sparse_view_file_ids
+            ]
+            assert self.pipeline_pretrain.datamanager.train_dataset is not None
+            pretrain_dataset = self.pipeline_pretrain.datamanager.train_dataset
+            # Read pre-training images and cameras
+            color_images, c2w, K, dist_params = read_dataset(
+                pretrain_dataset, read_images=True
+            )
+            cameras = pretrain_dataset.cameras
+            N, _, H, W = color_images.shape
+            # Get pre-training view indices
+            full_indices = torch.arange(N, device=device)
+            is_pretrain = torch.ones(N, dtype=torch.bool, device=device)
+            is_pretrain[sparse_view_indices] = False
+            pretrain_indices = full_indices[is_pretrain]
+            prefix="/home/ziqi/Packages/nerfstudio/data/nerfstudio/gt_masks/"
+            rgbs_sparse_paths=[
+                f"{prefix}/cube_rgb_new/frame_{idx:05g}.png"
+                for idx in sparse_view_file_ids
+            ]
+            rgbs_captured_sparse_view = \
+                read_imgs(rgbs_sparse_paths).to(device)
+        # Get sparse view camera parameters
+        cameras_sparse_view = cameras[torch.tensor(sparse_view_indices)]
+        cam_poses_sparse_view = c2w[sparse_view_indices]
+        Ks_sparse_view = K[sparse_view_indices]
+        dist_params_sparse_view = dist_params[sparse_view_indices]
+        # Get pre-training images and cameras
+        color_images_pretrain_view = color_images[pretrain_indices]
+        cam_poses_pretrain_view = c2w[pretrain_indices]
+        Ks_pretrain_view = K[pretrain_indices]
+        dist_params_pretrain_view = dist_params[pretrain_indices]
+        # -------------------------------------------------------
+
+        # Render images at the sparse viewpoints
+        rgbs_render_sparse_view, depths_sparse_view = render_cameras(
+            self.pipeline_pretrain, cameras_sparse_view, device=device
+        )
+        # # Uncomment to debug
+        # debug_image_pairs(
+        #   rgbs_render_sparse_view, rgbs_captured_sparse_view, self.debug_dir
+        # )
+
+        # Change detection on sparse views
+        # TODO: Align the rendered and captured images
+        # TODO: Handle multi-obj cases (1) obj association (2) multi-mask
+        masks_changed_sparse = []
+        for ii in range(len(sparse_view_file_ids)): 
+            masks_changed = self.image_diff(
+                rgbs_render_sparse_view[ii:ii+1],
+                rgbs_captured_sparse_view[ii:ii+1]
+            )
+            masks_changed_sparse.append(masks_changed)
+        # Uncomment to debug
+        # masks_changed_tensor = torch.cat(masks_changed_sparse, dim=0)
+        # save_masks(
+        #     masks_changed_tensor / 255.0, [
+        #         f"{self.debug_dir}/masks_changed{i}.png"
+        #         for i in range(len(masks_changed_tensor))
+        #     ]
+        # )
+        # Consensus between the sparse views on the number of changed masks
+        num_masks_changed = statistics.mode(
+            [len(m) for m in masks_changed_sparse]
+        )
+        masks_move_out_sparse_view, masks_move_in_sparse_view = [], []
+        for ii, masks_changed in enumerate(masks_changed_sparse):
+            # Compare SAM prediction confidences to determine move-in or -out
+            masks_render, scores_render = sam_refine_masks(
+                rgbs_render_sparse_view[ii:ii+1],
+                masks_changed[:num_masks_changed],
+                expand=configs["mask_refine_sparse_view"]
+            )
+            masks_capture, scores_capture = sam_refine_masks(
+                rgbs_captured_sparse_view[ii:ii+1],
+                masks_changed[:num_masks_changed],
+                expand=configs["mask_refine_sparse_view"]
+            )
+            discarded_masks = []
+            for jj in range(len(scores_render)):
+                if scores_render[jj] > scores_capture[jj]:
+                    masks_move_out_sparse_view.append(masks_render[jj])
+                    discarded_masks.append((1, jj, scores_capture[jj]))
+                    if scores_render[jj] < 0.95:
+                        print(f"WARN: Bad move-out mask at sparse view {ii}")
+                        print(f"score: {scores_render[jj]}")
+                else:
+                    masks_move_in_sparse_view.append(masks_capture[jj])
+                    discarded_masks.append((0, jj, scores_render[jj]))
+                    if scores_capture[jj] < 0.95:
+                        print(f"WARN: Bad move-in mask at sparse view {ii}")
+                        print(f"score: {scores_capture[jj]}")
+            # In case there are overlapping masks, we need to:
+            # Recycle discarded masks if we have less than needed masks
+            discarded_masks.sort(key=lambda x: x[2], reverse=True)
+            assert len(discarded_masks)+len(scores_render) >= num_masks_changed
+            for _ in range(num_masks_changed - len(scores_render)):
+                source, index, score = discarded_masks.pop(0)
+                if source == 0:
+                    masks_move_out_sparse_view.append(masks_render[index])
+                else:
+                    masks_move_in_sparse_view.append(masks_capture[index])
+                if score < 0.95:
+                    inout = ['in', 'out'][source]
+                    print(f"WARN: Bad move-{inout} mask at sparse view {ii}")
+                    print(f"score: {score}")
+        masks_move_out_sparse_view = torch.stack(
+            masks_move_out_sparse_view, dim=0
+        )
+        masks_move_in_sparse_view = torch.stack(
+            masks_move_in_sparse_view, dim=0
+        )
+        # # Uncomment to debug
+        # save_masks(
+        #     masks_move_in_sparse_view, [
+        #         f"{self.debug_dir}/masks_move_in{i}.png"
+        #         for i in range(len(masks_move_in_sparse_view))
+        #     ]
+        # )
+        # save_masks(
+        #     masks_move_out_sparse_view, [
+        #         f"{self.debug_dir}/masks_move_out{i}.png"
+        #         for i in range(len(masks_move_out_sparse_view))
+        #     ]
+        # )
+        # Estimate the object pose change from all the sparse views
+        # Choose the one with the most inlier
+        num_sparse_views = masks_move_out_sparse_view.size(0)
+        num_inliers, num_matches = 0, 0
+        pose_change = None
+        for idx in tqdm(range(num_sparse_views), desc="pose estimation"):
+            # Find the sparse view render with the largest number of matches
+            _, _, matches = image_matching(
+                rgbs_render_sparse_view,
+                rgbs_captured_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
+                masks_move_out_sparse_view,
+                masks_move_in_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
+                flip=True
+            )
+            matches_idx_ = [(len(mm), ii) for ii, mm in enumerate(matches)]
+            idx_max = max(matches_idx_)[1]
+            # Estimate the object pose change
+            pose_change_i, num_inlier_i, num_match_i = \
+            self.localize_wrt_posed_RGBD(
+                rgbs_render_sparse_view[idx_max:idx_max+1],
+                rgbs_captured_sparse_view[idx:idx+1],
+                depths_sparse_view[idx_max:idx_max+1],
+                cam_poses_sparse_view[idx_max],
+                Ks_sparse_view[idx_max], Ks_sparse_view[idx],
+                dist_params_sparse_view[idx_max], dist_params_sparse_view[idx],
+                masks_move_out_sparse_view[idx_max:idx_max+1],
+                masks_move_in_sparse_view[idx:idx+1],
+            )
+            if pose_change_i is None:
+                continue
+            # Equation in the paper
+            pose_change_i =  pose_change_i.inverse()
+            pose_change_i = cam_poses_sparse_view[idx] @ pose_change_i
+
+            if configs["pose_change_break"] is not None and \
+                idx == configs["pose_change_break"]:
+                num_inliers = num_inlier_i
+                num_matches = num_match_i
+                pose_change = pose_change_i
+                break
+            if num_inlier_i > num_inliers:
+                num_inliers = num_inlier_i
+                num_matches = num_match_i
+                pose_change = pose_change_i
+        assert pose_change is not None, "Object pose change estimation failed!"
+        print(f"pose_change: \n {pose_change.cpu().numpy()}")
+        print(f"inlier_ratio: {num_inliers} / {num_matches}")
+
+        # Convert sparse view depth images to point cloud wrt world 
+        point_cloud = compute_point_cloud(
+            depths_sparse_view, cam_poses_sparse_view, Ks_sparse_view,
+            masks_move_out_sparse_view
+        )
+        point_cloud = point_cloud_filtering(
+            point_cloud, configs["pcd_filtering"]
+        )
+        # debug_point_cloud(point_cloud, self.debug_dir)
+        bbox3d = compute_3D_bbox(point_cloud)
+        print(f"bbox3d: {bbox3d}")
+
+        # Query SAM to obtain pre-training view 2D masks
+        # Project the object point cloud to dense ald views
+        point_cloud_proj, is_point_in_img = project_points(
+            point_cloud, cam_poses_pretrain_view, Ks_pretrain_view,
+            dist_params_pretrain_view, H, W
+        )
+        if not is_point_in_img.all():
+            print("WARN: Some points are out of the pretraining images")
+        # debug_point_prompts(
+        #   color_images_pretrain_view, point_cloud_proj, self.debug_dir
+        # )
+        bbox2d = compute_2D_bbox(point_cloud_proj)
+        # Slightly expand 2D bboxes to improve SAM predictions
+        bbox2d = expand_2D_bbox(
+            bbox2d, configs["pre_train_pred_bbox_expand"]
+        )
+        # SAM predict all masks
+        masks, scores = sam_predict(color_images_pretrain_view, bbox2d)
+        # Refine low-score masks
+        for ii in tqdm(range(len(masks)), desc="SAM refine masks"):
+            if scores[ii] < 0.95:
+                masks[ii:ii+1], scores[ii:ii+1] = sam_refine_masks(
+                    color_images_pretrain_view[ii:ii+1], masks[ii:ii+1],
+                    expand=configs["pre_train_refine_bbox_expand"]
+                )
+        low_mask_scores = [x for x in scores if x < 0.95]
+        if len(low_mask_scores) > 0:
+            print(f"WARN: Got {len(low_mask_scores)} low score masks")
+            print(f"Lowest mask score: {min(low_mask_scores)}")
+        else:
+            print("All masks look great!!")
+
+        # Concat move-out masks on new sparse and old dense views
+        masks_move_out = torch.empty(
+            (N, *masks.shape[1:]), dtype=torch.bool
+        ).to(device)
+        is_sparse_view = torch.zeros(N, dtype=torch.bool).to(device)
+        is_sparse_view[sparse_view_indices] = True
+        masks_move_out[is_sparse_view] = masks_move_out_sparse_view
+        masks_move_out[~is_sparse_view] = masks.to(device)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
     parser.add_argument(
