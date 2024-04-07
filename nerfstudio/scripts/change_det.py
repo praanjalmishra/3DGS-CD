@@ -16,25 +16,76 @@ from pyquaternion import Quaternion
 from tqdm import tqdm
 
 from nerfstudio.cameras.camera_paths import get_path_from_json
+from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.models.splatfacto import SplatfactoModel
-from nerfstudio.pipelines.base_pipeline import Pipeline, VanillaPipeline
-from nerfstudio.utils.debug_utils import (debug_image_pairs, debug_images,
-                                          debug_masks, debug_matches)
+from nerfstudio.utils.debug_utils import (
+    debug_image_pairs, debug_images, debug_masks, debug_matches
+)
 from nerfstudio.utils.eval_utils import eval_setup
-from nerfstudio.utils.img_utils import (extract_depths_at_pixels, image_align,
-                                        image_matching, undistort_images)
-from nerfstudio.utils.io import (read_dataset, read_imgs, read_transforms,
-                                 save_masks)
+from nerfstudio.utils.img_utils import (
+    extract_depths_at_pixels, image_align, image_matching, undistort_images
+)
+from nerfstudio.utils.io import (
+    read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
+)
 from nerfstudio.utils.obj_3d_seg import Object3DSeg
-from nerfstudio.utils.pcd_utils import (compute_3D_bbox, compute_point_cloud,
-                                        expand_3D_bbox, point_cloud_filtering)
-from nerfstudio.utils.proj_utils import (depths_to_points,
-                                         proj_check_3D_points, project_points,
-                                         undistort_points)
+from nerfstudio.utils.pcd_utils import (
+    compute_3D_bbox, compute_point_cloud, expand_3D_bbox, point_cloud_filtering
+)
+from nerfstudio.utils.proj_utils import (
+    depths_to_points, proj_check_3D_points, project_points, undistort_points
+)
 from nerfstudio.utils.render_utils import render_cameras
-from nerfstudio.utils.sam_utils import (compute_2D_bbox, expand_2D_bbox,
-                                        sam_embedding, sam_predict,
-                                        sam_refine_masks)
+from nerfstudio.utils.sam_utils import (
+    compute_2D_bbox, expand_2D_bbox, sam_embedding, sam_predict,
+    sam_refine_masks
+)
+
+
+def camera_clone(cameras):
+    """
+    Clone a Cameras object
+
+    Args:
+        cameras (Cameras): Cameras object to clone
+
+    Returns:
+        cameras_new (Cameras): Cloned Cameras object
+    """
+    cameras_new = Cameras(
+        camera_to_worlds=cameras.camera_to_worlds.clone(),
+        fx=cameras.fx.clone(), fy=cameras.fy.clone(),
+        cx=cameras.cx.clone(), cy=cameras.cy.clone(),
+        distortion_params=cameras.distortion_params.clone(),
+    )
+    return cameras_new
+
+
+def new_cams_to_pretrain(cameras, pose_change):
+    """
+    Map new cameras poses back to corresponding pre-training camera poses,
+    so that rendering with the pre-trained 3DGS at the updated poses
+    gives (almost) the same object appearance
+
+    Args:
+        cameras (Cameras): Camera poses wrt world
+        pose_change (4x4 tensor): Pose change
+
+    Returns:
+        c2w_new (Cameras): Updated camera poses wrt world
+    """
+    assert pose_change.shape == (4, 4)
+    # Read 4x4 camera poses
+    cameras = camera_clone(cameras)
+    c2w = cameras.camera_to_worlds.to(pose_change.device)
+    c2w = torch.cat([c2w, torch.zeros(c2w.shape[0], 1, 4).to(c2w)], dim=1)
+    c2w[:, 3, 3] = 1
+    c2w[:, 0:3, 1:3] = -c2w[:, 0:3, 1:3] # OpenGL to OpenCV
+    # Apply the pose change
+    c2w_new = pose_change.inverse() @ c2w
+    c2w_new[:, 0:3, 1:3] = -c2w_new[:, 0:3, 1:3] # OpenCV to OpenGL
+    cameras.camera_to_worlds = c2w_new[:, 0:3, :]
+    return cameras
 
 
 class ChangeDet:
@@ -131,6 +182,103 @@ class ChangeDet:
         #     )
         return masks
 
+    def pretrain_iteration(self, rgbs, masks, cameras):
+        """
+        Forward pass through the pre-trained 3DGS
+
+        Args:
+            rgbs (Nx3xHxW): Captured sparse view RGB images
+            masks (Nx1xHxW): Sampling masks on the sparse views
+            cameras (Cameras): NeRFStudio Cameras object of size N
+
+        Returns:
+            rgb_loss: RGB loss btw the captured and rendered pixels
+        """
+        rgbs = rgbs.permute(0, 2, 3, 1)
+        masks = masks.permute(0, 2, 3, 1)
+        batches = [
+            { "image": rgb, "mask": mask, "image_idx": ii} 
+            for ii, (rgb, mask) in enumerate(zip(rgbs, masks))
+        ]
+        loss_accumulated = torch.tensor(0.0, device=rgbs.device)
+        for ii, batch in enumerate(batches):
+            camera = cameras[ii:ii+1]
+            outputs = self.pipeline_pretrain.model(camera)
+            loss_dict = self.pipeline_pretrain.model.get_loss_dict(
+                outputs, batch, None
+            )
+            loss = sum(loss_dict.values())
+            loss_accumulated += loss
+        return loss_accumulated
+
+    def refine_obj_pose_change(
+        self, pose_init, rgbs, masks, cameras,
+        lr=1e-3, epochs=500, patience=100
+    ):
+        """
+        Refine object pose change to make the object pose pixel-perfect
+
+        Args:
+            pose_init (4x4): Object pose change initial value
+            rgbs (Nx3xHxW): Captured sparse view RGB images
+            masks (Nx1xHxW): Object masks on the sparse views
+            cameras (Cameras): NeRFStudio Cameras object
+            batch_size (int): Batch size for training
+            epochs (int): Number of epochs
+            patience (int): Number of epochs to wait for plateau
+        
+        Returns:
+            pose_refined (4x4): Refined object pose change
+        """
+        from nerfstudio.cameras.lie_groups import exp_map_SO3xR3
+        from nerfstudio.utils.poses import to4x4
+        assert hasattr(self, "pipeline_pretrain"), \
+            "Pre-training pipeline not loaded yet"
+        assert pose_init.shape == (4, 4)
+        cam_init = camera_clone(cameras)
+        device = rgbs.device
+        # Uncomment to debug
+        # debug_masks(masks, self.debug_dir)
+        # Make a pose update parameter
+        pose_update = torch.nn.Parameter(
+            torch.zeros((1, 6), device=device)
+        )
+        optimizer = torch.optim.Adam([pose_update], lr=lr)
+        # Training loop
+        best_loss, initial_loss = float("inf"), None
+        plateau_count = 0
+        with tqdm(total=epochs, desc="pose change opt") as pbar:
+            for idx in range(epochs):
+                optimizer.zero_grad()
+                pose_update4x4 = to4x4(exp_map_SO3xR3(pose_update))
+                pose_update4x4 = pose_update4x4.reshape(4, 4)
+                # Map new cameras to corresponding pre-training cameras
+                pretrain_cam = new_cams_to_pretrain(
+                    cam_init, pose_init @ pose_update4x4
+                )
+                # Forward pass
+                rgb_loss = self.pretrain_iteration(rgbs, masks, pretrain_cam)
+                # Backward pass
+                rgb_loss.backward()
+                optimizer.step()
+                pbar.set_postfix(
+                    {'Epoch': idx+1, 'RGB Loss': f'{rgb_loss.item():.4f}'}
+                )
+                pbar.update(1)
+                if initial_loss is None:
+                    initial_loss = rgb_loss.item()
+                if rgb_loss.item() < best_loss:
+                    best_loss = rgb_loss.item()
+                    plateau_count = 0
+                else:
+                    plateau_count += 1
+                    if plateau_count > patience:
+                        print(f"Early stopping at epoch {idx+1} after plateau")
+                        break
+        if rgb_loss.item() > initial_loss:
+            print("Warning: RGB loss increased after pose change refinement")
+        pose_refined = pose_init @ pose_update4x4.detach()
+        return pose_refined
 
     def localize_wrt_posed_RGBD(
         self, rgb1, rgb2,  depth1, pose1, K1, K2, dist1, dist2,
@@ -219,7 +367,7 @@ class ChangeDet:
 
     def main(
         self, transforms_json=None, configs=None,
-        refine_pose=False, cam_path=None
+        refine_pose=True, cam_path=None
     ):
         """
         Estimate object 2D masks, coarse 3D Bbox and pose change
@@ -474,6 +622,22 @@ class ChangeDet:
         assert pose_change is not None, "Object pose change estimation failed!"
         print(f"pose_change: \n {pose_change.cpu().numpy()}")
         print(f"inlier_ratio: {num_inliers} / {num_matches}")
+
+        # Refine object pose change
+        if refine_pose:
+            new_cameras = params_to_cameras(
+                cam_poses_sparse_view, Ks_sparse_view, 
+                dist_params_sparse_view, H, W
+            )
+            pose_change = self.refine_obj_pose_change(
+                pose_change, rgbs_captured_sparse_view, 
+                masks_move_in_sparse_view, new_cameras,
+                lr=configs["pose_refine_lr"],
+                epochs=configs["pose_refine_epochs"],
+                patience=configs["pose_refine_patience"]
+            )
+            print(f"refined pose_change: \n {pose_change.cpu().numpy()}")
+
 
         # Convert sparse view depth images to point cloud wrt world 
         point_cloud = compute_point_cloud(
