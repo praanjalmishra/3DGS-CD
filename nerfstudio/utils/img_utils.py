@@ -363,14 +363,20 @@ def batch_crop_resize(
     return op(img, rois)
 
 
-def rgb2rgba(rgb_folder, mask_folder, output_folder):
+def rgb2rgba(rgb_files, mask_files, output_folder):
+    """
+    Convert RGB images to RGBA format using binary masks
+
+    Args:
+        rgb_files (list): List of RGB image paths
+        mask_files (list): List of mask image paths
+        output_folder (str): Output folder for RGBA images
+    """
     # Ensure output folder exists
     assert os.path.isdir(output_folder), "Output folder does not exist"
-    rgb_img_files = sorted(glob(os.path.join(rgb_folder, "*.png")))
-    mask_img_files = sorted(glob(os.path.join(mask_folder, "*.png")))
-
+    assert len(rgb_files) == len(mask_files), "Number of images do not match"
     # Iterate through all images in the RGB folder
-    for rgb_img_path, mask_img_path in tqdm(zip(rgb_img_files, mask_img_files), desc="RGB2RGBA"):
+    for rgb_img_path, mask_img_path in tqdm(zip(rgb_files, mask_files), desc="RGB2RGBA"):
         # Load the RGB(A) image and its corresponding mask
         rgb_image = Image.open(rgb_img_path).convert("RGBA")
         mask_image = Image.open(mask_img_path).convert("L")

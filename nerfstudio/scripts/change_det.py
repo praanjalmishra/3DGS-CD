@@ -12,6 +12,7 @@ import pycolmap
 import torch
 from lightglue import viz2d
 from matplotlib import pyplot as plt
+from PIL import Image
 from pyquaternion import Quaternion
 from tqdm import tqdm
 
@@ -209,6 +210,10 @@ class ChangeDet:
             )
             loss = sum(loss_dict.values())
             loss_accumulated += loss
+        # Uncomment to vis the pose regression process
+        # blend = rgbs[-1] * 0.2 + outputs["rgb"] * masks[-1] * 0.8
+        # blend = (blend.detach().cpu().numpy() * 255).astype(np.uint8)
+        # Image.fromarray(blend).save(self.debug_dir + f"blend{debug_count}.png")
         return loss_accumulated
 
     def refine_obj_pose_change(
@@ -349,7 +354,7 @@ class ChangeDet:
         )
         ret = pycolmap.absolute_pose_estimation(
             matched_pts2D, matched_pts3D, pycolmap_cam,
-            estimation_options={'ransac': {'max_error': 1.0, "min_num_trials": 10000}}, 
+            estimation_options={'ransac': {'max_error': 12.0}}, 
             refinement_options={'print_summary': verbose}
         )
         if not ret['success']:
