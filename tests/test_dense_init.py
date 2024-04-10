@@ -3,6 +3,7 @@
 import argparse
 import os
 import cv2
+import shutil
 import torch
 from PIL import Image
 import numpy as np
@@ -11,6 +12,10 @@ from pathlib import Path
 from matplotlib import pyplot as plt
 from nerfstudio.utils.io import load_from_json, write_to_json
 from nerfstudio.utils.proj_utils import depths_to_points
+from nerfstudio.utils.debug_utils import debug_depths
+from transformers import pipeline
+from scipy.ndimage import distance_transform_cdt
+from scipy.optimize import least_squares
 
 
 def compute_depth_map(camera_to_world_pose, intrinsics, height, width):
@@ -47,6 +52,73 @@ def compute_depth_map(camera_to_world_pose, intrinsics, height, width):
     # depth can be directly calculated
     depth_map = t.reshape(height, width)
     return depth_map
+
+
+def masked_mahalanobis_distance(mask):
+    # Compute Manhattan distance of a masked image:
+    # inside the mask, distances are 0s, outside they are positive
+    mask = mask.astype(float) / 255
+    distance_outside = distance_transform_cdt(1 - mask, metric='taxicab')
+    # Set distances inside the mask to 0
+    distance_outside[mask > 0] = 0
+    return distance_outside
+
+
+def inpaint_depth_map(gt_depth, mask, disp, method="wls"):
+    """
+    Use predicted disparity map to fill the mask in the GT depth map
+
+    Args:
+    - depth (HxW): GT depth map
+    - mask (HxW bool): mask == True is the area to inpaint
+    - disp (HxW): predicted disparity map
+    - method (str): "Inpainting" method: 1/depth = A * disp + B
+                    "gt": A = 1 / d_min - 1/d_max; B = 1/d_max
+                    "ls": A, B = lsq(1/depth, disp)
+                    "wls": A, B = wlsq(1/depth, disp)
+
+    Returns:
+    - depth (HxW): "Inpainted" depth map
+
+    References:
+    - GT: https://github.com/heyoeyo/muggled_dpt/blob/main/.readme_assets/results_explainer.md
+    - Least-squares: https://github.com/isl-org/MiDaS/issues/171
+    """
+    assert gt_depth.shape == mask.shape == disp.shape
+    # Normalize predicted disparity to [0, 1]
+    disp = disp / disp.max()
+    # Convert GT depth to GT disparity
+    inv_depth = 1 / gt_depth
+    inv_depth_min = inv_depth[mask <= 0].min()
+    inv_depth_max = inv_depth[mask <= 0].max()
+    if method == "gt":
+        A = inv_depth_max - inv_depth_min
+        B = inv_depth_min
+    elif method in ["ls", "wls"]:
+        disp_masked = disp[mask <= 0].flatten()
+        inv_depth_masked = inv_depth[mask <= 0].flatten()
+        disp_homo = np.vstack([disp_masked, np.ones_like(disp_masked)]).T
+        if method == "ls":
+            weights = np.ones_like(inv_depth_masked)
+        else:
+            weights = masked_mahalanobis_distance(mask)[mask <= 0].flatten()
+            weights = 1 / weights**2
+        def residuals(beta, X, y, weights):
+            return np.sqrt(weights) * (y - X.dot(beta))
+        beta_init = np.array([inv_depth_max - inv_depth_min, inv_depth_min])
+        result = least_squares(
+            residuals, beta_init, args=(disp_homo, inv_depth_masked, weights),
+        )
+        assert result.success, "Least squares fitting failed!"
+        A, B = result.x[0], result.x[1]
+    else:
+        raise ValueError(f"Method: {method} not supported!")
+    out_depth = np.zeros_like(gt_depth)
+    out_depth[mask <= 0] = gt_depth[mask <= 0]
+    # "Inpaint" the GT disparity using the predicted disparity
+    out_depth[mask > 0] = 1 / (A * disp[mask > 0] + B)
+    return out_depth
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -120,11 +192,37 @@ for i in train_indices:
 colors = np.concatenate(colors, axis=0)
 
 # Compute the camera depth maps to the z=0 ground plane in the world coordinate
-depths = []
+gt_depths = []
 for pose in train_poses:
     depth_map = compute_depth_map(pose, K, H, W)
-    depths.append(depth_map)
-depths = np.stack(depths)
+    gt_depths.append(depth_map)
+gt_depths = np.stack(gt_depths, axis=0)
+
+# Depth-anything to predict disparity maps
+pipe = pipeline(
+    task="depth-estimation", model="LiheYoung/depth-anything-small-hf"
+)
+depths = []
+for ii, ind in enumerate(train_indices):
+    img = Image.open(Path(args.tjson).parent / f"rgb_new/frame_{ind:05d}.png")
+    disp = pipe(img)["predicted_depth"]
+    disp = torch.nn.functional.interpolate(
+        disp.unsqueeze(1), size=img.size[::-1], mode="bicubic",
+        align_corners=False,
+    )
+    pred_depth = inpaint_depth_map(
+        gt_depths[ii], masks[ii], disp.squeeze().numpy()
+    )
+    depths.append(pred_depth)
+
+
+# Evaluate the depth accuracy with L1 error
+l1_errors = []
+for gt, pred, mask in zip(gt_depths, depths, masks):
+    l1_error = np.abs(gt[mask > 0] - pred[mask > 0]).mean()
+    l1_errors.append(l1_error)
+print(f"Mean L1 error: {np.mean(l1_errors)}")
+
 
 # Backproject the depths to 3D points
 points = []
@@ -152,7 +250,6 @@ data["ply_file_path"] = "sparse_pc.ply"
 write_to_json(Path(args.out) / "transforms.json", data)
 
 # Move images and masks to new folders
-import shutil
 if not os.path.isdir(f"{args.out}/rgb_new"):
     os.makedirs(f"{args.out}/rgb_new")
 for i in train_indices + eval_indices:
@@ -168,3 +265,20 @@ for i in train_indices + eval_indices:
         Path(args.tjson).parent / f"masks_new/mask_{i:05d}.png",
         f"{args.out}/masks_new/mask_{i:05d}.png"
     )
+
+
+print("Train splatfacto with the following command:")
+print(
+    "ns-train splatfacto --vis viewer+tensorboard" +
+    "--experiment-name <exp_name> --steps_per_eval_all_images 100 " +
+    "--pipeline.model.warmup_length 0" + # No warmup
+    "--pipeline.model.refine_every 50000 " + # No densification
+    "--pipeline.model.use_scale_regularization True " + # Encourage isotropic
+    "--pipeline.model.num_downscales 0 " + # Don't downscale
+    "--pipeline.model.continue_cull_post_densification False " +
+    "--pipeline.model.reset_alpha_every 30000 " + # No opacity reset
+    "--pipeline.model.sh_degree_interval 10 " +
+    "--max-num-iterations 1000" +
+    f"nerfstudio-data --data {args.out}/transforms.json" +
+    " --auto-scale-poses=False --center-method none --orientation-method none"
+)
