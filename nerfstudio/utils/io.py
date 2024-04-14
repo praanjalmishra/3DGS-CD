@@ -19,6 +19,7 @@ Input/output utils.
 import json
 import numpy as np
 import os
+import shutil
 import torch
 from pathlib import Path
 from PIL import Image
@@ -260,3 +261,121 @@ def read_dataset(train_dataset, read_images=True, device="cuda"):
     # Read distortion coefficients
     dist_params = cameras.distortion_params[:, [0, 1, 4, 5]].to(device)
     return images, c2w, K, dist_params
+
+
+def save_alpha_transparent_train_data(
+    masks, masks_new, pose_change, data_dir, output_dir, gt_pose_change=None
+):
+    """
+    Save alpha transparency training data
+    NOTE: Data must have the NeRF Update format
+    -rgb:
+        -frame_{i:05g}.png
+    -rgb_new
+        -frame_{i:05g}.png
+    -masks
+        -mask_{i:05g}.png
+    -masks_new
+        -mask_{i:05g}.png
+    -transforms.json
+
+    Args:
+        masks (N, 1, H, W): Masks
+        masks_new (N, 1, H, W): New masks
+        pose_change (4, 4): Pose change matrix
+        data_dir (str): Data directory
+        output_dir (str): Output directory
+    """
+    from nerfstudio.utils.img_utils import rgb2rgba
+    assert os.path.isdir(data_dir), f"{data_dir} does not exist"
+    assert pose_change.shape == (4, 4)
+    if type(pose_change) == torch.Tensor:
+        pose_change = pose_change.detach().cpu().numpy()
+    assert len(masks.shape) == len(masks_new.shape) == 4
+    assert masks.shape[1] == masks_new.shape[1] == 1
+    if gt_pose_change is None:
+        print("Warning: Not passing gt_pose_change lead to incorret eval")
+    else:
+        assert gt_pose_change.shape == (4, 4)
+        if type(gt_pose_change) == torch.Tensor:
+            gt_pose_change = gt_pose_change.detach().cpu().numpy()
+
+    # Load transforms.json
+    tjson = load_from_json(Path(f"{data_dir}/transforms.json"))
+    frames = tjson["frames"]
+    trainfiles = tjson["train_filenames"]
+    trainfiles_old = [
+        f"{data_dir}/{f}" for f in trainfiles if not "rgb_new" in f
+    ]
+    trainfiles_new = [
+        f"{data_dir}/{f}" for f in trainfiles if "rgb_new" in f
+    ]
+    assert len(trainfiles_old) == len(masks)
+    assert len(trainfiles_new) == len(masks_new)
+
+    # Save masks to temp folders
+    mask_files_old = [
+        f"{output_dir}/obj_masks/{os.path.basename(f)}" for f in trainfiles_old
+    ]
+    mask_files_new = [
+        f"{output_dir}/obj_masks_new/{os.path.basename(f)}"
+        for f in trainfiles_new
+    ]    
+    if not os.path.exists(output_dir / "obj_masks"):
+        os.makedirs(output_dir / "obj_masks")
+        save_masks(masks, mask_files_old)
+    if not os.path.exists(output_dir / "obj_masks_new"):
+        os.makedirs(output_dir / "obj_masks_new")
+        save_masks(masks_new, mask_files_new)
+
+    # Convert rgb + masks to rgba
+    if not os.path.exists(output_dir / "rgba"):
+        os.makedirs(output_dir / "rgba")
+    rgb2rgba(trainfiles_old, mask_files_old, f"{output_dir}/rgba")
+    if not os.path.exists(output_dir / "rgba_new"):
+        os.makedirs(output_dir / "rgba_new")
+    rgb2rgba(trainfiles_new, mask_files_new, f"{output_dir}/rgba_new")
+
+    if os.path.exists(output_dir / "obj_masks"):
+        shutil.rmtree(output_dir / "obj_masks")
+    if os.path.exists(output_dir / "obj_masks_new"):
+        shutil.rmtree(output_dir / "obj_masks_new")
+
+    # Update filenames in transforms.json
+    for i in range(len(tjson["train_filenames"])):
+        tjson["train_filenames"][i] = \
+            tjson["train_filenames"][i].replace("rgb", "rgba")
+    if gt_pose_change is not None:
+        for i in range(len(tjson["test_filenames"])):
+            tjson["test_filenames"][i] = \
+                tjson["test_filenames"][i].replace("rgb", "rgba")
+        for i in range(len(tjson["val_filenames"])):
+            tjson["val_filenames"][i] = \
+                tjson["val_filenames"][i].replace("rgb", "rgba")
+    
+    # Update camera poses and remove masks
+    for frame in frames:
+        # remove masks
+        frame.pop("mask_path", None)
+        # Update camera poses
+        if "rgb_new" in frame["file_path"]:
+            pose = np.array(frame["transform_matrix"])
+            pose[0:3, 1:3] = -pose[0:3, 1:3] # OpenGL to OpenCV
+            if frame["file_path"] in trainfiles_new or gt_pose_change is None:
+                pose = np.linalg.inv(pose_change) @ pose
+            else:
+                pose = np.linalg.inv(gt_pose_change) @ pose
+            pose[0:3, 1:3] = -pose[0:3, 1:3] # OpenCV to OpenGL
+            frame["transform_matrix"] = pose.tolist()
+        frame["file_path"] = frame["file_path"].replace("rgb", "rgba")
+    
+    write_to_json(Path(f"{output_dir}/transforms_obj.json"), tjson)
+
+    print("Run the following command to reconstruct the full object model:")
+    print(
+        f"ns-train splatfacto --pipeline.model.background-color random" + 
+        " --pipeline.model.random_scale 0.5"+
+        f" nerfstudio-data --data {output_dir}/transforms_obj.json"
+    )
+
+
