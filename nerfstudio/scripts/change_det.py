@@ -58,6 +58,7 @@ def camera_clone(cameras):
         fx=cameras.fx.clone(), fy=cameras.fy.clone(),
         cx=cameras.cx.clone(), cy=cameras.cy.clone(),
         distortion_params=cameras.distortion_params.clone(),
+        width=cameras.width, height=cameras.height
     )
     return cameras_new
 
@@ -322,7 +323,7 @@ class ChangeDet:
         _, _, H, W = depth1.shape
         # Image feature matching between rgb1 and rgb2
         kp1, kp2, matches = image_matching(
-            rgb1, rgb2, mask1, mask2, flip=True
+            rgb1, rgb2, mask1, mask2, flip=False
         )
         # Uncomment to debug
         # debug_matches(rgb1, rgb2, kp1, kp2, matches, self.debug_dir)
@@ -592,7 +593,7 @@ class ChangeDet:
                 rgbs_captured_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
                 masks_move_out_sparse_view,
                 masks_move_in_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
-                flip=True
+                flip=False
             )
             matches_idx_ = [(len(mm), ii) for ii, mm in enumerate(matches)]
             idx_max = max(matches_idx_)[1]
