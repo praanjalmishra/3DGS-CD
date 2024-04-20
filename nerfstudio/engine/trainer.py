@@ -40,6 +40,7 @@ from nerfstudio.pipelines.base_pipeline import VanillaPipeline
 from nerfstudio.utils import profiler, writer
 from nerfstudio.utils.decorators import check_eval_enabled, check_main_thread, check_viewer_enabled
 from nerfstudio.utils.misc import step_check
+from nerfstudio.utils.render_utils import render_during_train
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.writer import EventName, TimeWriter
 from nerfstudio.viewer.viewer import Viewer as ViewerState
@@ -84,7 +85,8 @@ class TrainerConfig(ExperimentConfig):
     """Optionally log gradients during training"""
     gradient_accumulation_steps: Dict[str, int] = field(default_factory=lambda: {})
     """Number of steps to accumulate gradients over. Contains a mapping of {param_group:num}"""
-
+    render_during_train: Optional[str] = None
+    """Path to camera path to render during training."""
 
 class Trainer:
     """Trainer class
@@ -239,7 +241,11 @@ class Trainer:
                 with self.train_lock:
                     with TimeWriter(writer, EventName.ITER_TRAIN_TIME, step=step) as train_t:
                         self.pipeline.train()
-
+                        if self.config.render_during_train is not None:
+                            render_during_train(
+                                self.pipeline, self.config.render_during_train,
+                                step, "/home/ziqi/Desktop/test/"
+                            )
                         # training callbacks before the training iteration
                         for callback in self.callbacks:
                             callback.run_callback_at_location(
