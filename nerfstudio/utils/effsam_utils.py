@@ -1,15 +1,17 @@
-import torch
 import numpy as np
+import torch
 
 from efficient_sam.build_efficient_sam import (
     build_efficient_sam_vits, build_efficient_sam_vitt
 )
 from nerfstudio.utils.debug_utils import debug_bbox_prompts
+from nerfstudio.utils.sam_utils import compute_2D_bbox, expand_2D_bbox
 from tqdm import tqdm
+
 
 # Load EfficientSAM model
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model_type = "vit_t"
+model_type = "vit_s"
 if model_type == "vit_s":
     effsam = build_efficient_sam_vits()
 elif model_type == "vit_t":
@@ -82,3 +84,31 @@ def effsam_embedding(rgb):
         features, rgb.shape[-2:], mode="bilinear", align_corners=False
     )
     return features
+
+
+def effsam_refine_masks(rgb, masks, expand=0.1):
+    """
+    Use SAM to refine the masks on a RGB image
+
+    Args:
+        rgbs: (1, 3, H, W) RGB images
+        masks: (M, 1, H, W) Image masks
+        expand (float): How much we expand the extracted bbox as prompt (%) 
+
+    Returns:
+        masks_refined (M, 1, H, W): Refined image masks   
+        scores (M-list): Confidence scores     
+    """
+    assert rgb.shape[1] == 3
+    assert len(masks.shape) == 4
+    bboxes = []
+    for mask in masks:
+        point_coords = torch.nonzero(mask.squeeze())[:, [1, 0]]
+        bbox = compute_2D_bbox(point_coords.unsqueeze(0))
+        bbox = expand_2D_bbox(bbox, expand)
+        bboxes.append(bbox)
+    bboxes = torch.cat(bboxes, dim=0)
+    masks_refined, scores = effsam_predict(
+        rgb.repeat(masks.shape[0], 1, 1, 1), bboxes
+    )
+    return masks_refined, scores
