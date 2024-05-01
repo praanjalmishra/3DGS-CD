@@ -415,12 +415,13 @@ class Splatfacto2Model(Model):
                 dict_new[f"gauss_params.{p}"] = \
                     dict[f"gauss_params.{p}"][obj_mask_dilate]
 
-            newp = dict_new["gauss_params.means"].shape[0]
             # Load pre-trained 3DGS and fix the gaussian params
             self.gauss_params_fixed = {}
             for name, param in self.gauss_params.items():
                 self.gauss_params_fixed[name] = \
                     dict[f"gauss_params.{name}"].to(self.device)
+            # Load the Gaussians to finetune
+            newp = dict_new["gauss_params.means"].shape[0]
             for name, param in self.gauss_params.items():
                 old_shape = param.shape
                 new_shape = (newp,) + old_shape[1:]
@@ -542,7 +543,6 @@ class Splatfacto2Model(Model):
             optimizer.state[gauss_param[0]] = param_state
             optimizer.param_groups[0]["params"] = gauss_param
             del param
-
 
     def remove_from_optim(self, optimizer, deleted_mask, new_params):
         """removes the deleted_mask from the optimizer provided"""

@@ -6,6 +6,8 @@ import numpy as np
 from PIL import Image
 
 from nerfstudio.cameras.camera_paths import get_path_from_json
+from nerfstudio.cameras.cameras import Cameras
+
 
 
 def render_cameras(pipeline, cameras, device="cpu"):
@@ -73,3 +75,118 @@ def render_during_train(
             Image.fromarray((rgb).astype(np.uint8)).save(
                 f"{output_dir}/{step:05g}.png"
             )
+
+
+def render_3dgs_at_cam(cam, gaussians, device="cuda"):
+    """
+    Render 3D Gaussians at a given camera
+
+    Args:
+        cam (NeRFStudio Cameras): a single camera
+        gaussians (Dict): gaussian parameters
+
+    Returns:
+        rgb (HxWx3 Tensor): RGB image
+    """
+    if not isinstance(cam, Cameras):
+        print("Called get_outputs with not a camera")
+        return {}
+    assert cam.shape[0] == 1, "Only one camera at a time"
+    from gsplat.project_gaussians import project_gaussians
+    from gsplat.rasterize import rasterize_gaussians
+    from gsplat.sh import spherical_harmonics
+
+    background = torch.tensor([0.1490, 0.1647, 0.2157]).to(device)
+
+    # shift the camera to center of scene looking at center
+    R = cam.camera_to_worlds[0, :3, :3]  # 3 x 3
+    T = cam.camera_to_worlds[0, :3, 3:4]  # 3 x 1
+    # flip the z and y axes to align with gsplat conventions
+    R_edit = torch.diag(
+        torch.tensor([1, -1, -1], device=device, dtype=R.dtype)
+    )
+    R = R @ R_edit
+    # analytic matrix inverse to get world2camera matrix
+    R_inv = R.T
+    T_inv = -R_inv @ T
+    viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
+    viewmat[:3, :3] = R_inv
+    viewmat[:3, 3:4] = T_inv
+    # calculate the FOV of the camera given fx and fy, width and height
+    cx = cam.cx.item()
+    cy = cam.cy.item()
+    W, H = int(cam.width.item()), int(cam.height.item())
+
+    opacities_crop = gaussians["opacities"]
+    means_crop = gaussians["means"]
+    features_dc_crop = gaussians["features_dc"]
+    features_rest_crop = gaussians["features_rest"]
+    scales_crop = gaussians["scales"]
+    quats_crop = gaussians["quats"]
+
+    colors_crop = torch.cat(
+        (features_dc_crop[:, None, :], features_rest_crop), dim=1
+    )
+    BLOCK_WIDTH = 16
+    xys, depths, radii, conics, comp, num_tiles_hit, cov3d = project_gaussians(
+        means_crop,
+        torch.exp(scales_crop),
+        1,
+        quats_crop / quats_crop.norm(dim=-1, keepdim=True),
+        viewmat.squeeze()[:3, :],
+        cam.fx.item(),
+        cam.fy.item(),
+        cx,
+        cy,
+        H,
+        W,
+        BLOCK_WIDTH,
+    )  # type: ignore
+
+    if radii.sum() == 0:
+        rgb = background.repeat(H, W, 1)
+        depth = background.new_ones(*rgb.shape[:2], 1) * 10
+        accumulation = background.new_zeros(*rgb.shape[:2], 1)
+
+        return {
+            "rgb": rgb, "depth": depth, "accumulation": accumulation,
+            "background": background
+        }
+
+    viewdirs = means_crop.detach() - cam.camera_to_worlds.detach()[..., :3, 3]
+    viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
+    rgbs = spherical_harmonics(3, viewdirs, colors_crop)
+    rgbs = torch.clamp(rgbs + 0.5, min=0.0)  # type: ignore
+
+    assert (num_tiles_hit > 0).any()  # type: ignore
+
+    # Apply the compensation of screen space blurring to gaussians
+    rasterize_mode = "antialiased"
+    opacities = None
+    if rasterize_mode == "antialiased":
+        opacities = torch.sigmoid(opacities_crop) * comp[:, None]
+    elif rasterize_mode == "classic":
+        opacities = torch.sigmoid(opacities_crop)
+    else:
+        raise ValueError("Unknown rasterize_mode: %s", rasterize_mode)
+
+    rgb, alpha = rasterize_gaussians(  # type: ignore
+        xys, depths, radii, conics, num_tiles_hit,  # type: ignore
+        rgbs, opacities, H, W, BLOCK_WIDTH, background=background,
+        return_alpha=True,
+    )  # type: ignore
+    alpha = alpha[..., None]
+    rgb = torch.clamp(rgb, max=1.0)
+    rgb = rgb.unsqueeze(0).permute(0, 3, 1, 2)
+    depth_im = None
+    depth_im = rasterize_gaussians(  # type: ignore
+        xys, depths, radii, conics, num_tiles_hit, # type: ignore
+        depths[:, None].repeat(1, 3), opacities, H, W,
+        BLOCK_WIDTH, background=torch.zeros(3, device=device),
+    )[..., 0:1]  # type: ignore
+    depth_im = torch.where(
+        alpha > 0, depth_im / alpha, depth_im.detach().max()
+    )
+    depth_im = depth_im.unsqueeze(0).permute(0, 3, 1, 2)
+
+    return rgb, depth_im
