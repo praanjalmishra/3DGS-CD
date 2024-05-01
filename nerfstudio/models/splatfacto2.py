@@ -385,22 +385,19 @@ class Splatfacto2Model(Model):
             obj_mask = self.obj_3d_seg.query(
                dict["gauss_params.means"].cuda()
             ).cpu()
-            # Move the Gaussians
-            obj_means = dict["gauss_params.means"][obj_mask]
-            pose_change = self.obj_3d_seg.pose_change.cpu()
-            dict["gauss_params.means"][obj_mask] = \
-                (pose_change[:3, :3] @ obj_means.T + pose_change[:3, 3:4]).T
-            # Rotate the Gaussians
-            quats = dict["gauss_params.quats"][obj_mask]
-            if quats.shape[0] > 0:
-                quats = quats / quats.norm(dim=-1, keepdim=True)
-                rots = quat_to_rotmat(quats)  # how these scales are rotated
-                rots_new = pose_change[:3, :3] @ rots
-                dict["gauss_params.quats"][obj_mask] = rot2quat(rots_new)
+            if dict["gauss_params.quats"][obj_mask].shape[0] > 0:
+                (
+                    dict["gauss_params.means"][obj_mask], 
+                    dict["gauss_params.quats"][obj_mask]
+                ) = transform_gaussians(
+                    self.obj_3d_seg.pose_change.cpu(),
+                    dict["gauss_params.means"][obj_mask],
+                    dict["gauss_params.quats"][obj_mask]
+                )
 
             # for p in param_names:
             #     dict[f"gauss_params.{p}"] = dict[f"gauss_params.{p}"][~obj_mask]
-            
+
             # corner1 = (2.5 / 11.0, 2.5 / 11.0, 2.02 / 11.0)
             # corner2 = (-2.5 / 11.0, -2.5 / 11.0, -2.02 / 11.0)
             # obj_mask_dilate = cube_mask(
