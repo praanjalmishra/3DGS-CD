@@ -97,6 +97,12 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
     from gsplat.sh import spherical_harmonics
 
     background = torch.tensor([0.1490, 0.1647, 0.2157]).to(device)
+    params = [
+        "opacities", "means", "features_dc", "features_rest", "scales", "quats"
+    ]
+    if "gauss_params.means" in gaussians:
+        for param in params:
+            gaussians[param] = gaussians[f"gauss_params.{param}"].to(device)
 
     # shift the camera to center of scene looking at center
     R = cam.camera_to_worlds[0, :3, :3]  # 3 x 3
@@ -143,15 +149,7 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
         BLOCK_WIDTH,
     )  # type: ignore
 
-    if radii.sum() == 0:
-        rgb = background.repeat(H, W, 1)
-        depth = background.new_ones(*rgb.shape[:2], 1) * 10
-        accumulation = background.new_zeros(*rgb.shape[:2], 1)
-
-        return {
-            "rgb": rgb, "depth": depth, "accumulation": accumulation,
-            "background": background
-        }
+    assert radii.sum() != 0, "No Gaussian can be projected to the input camera"
 
     viewdirs = means_crop.detach() - cam.camera_to_worlds.detach()[..., :3, 3]
     viewdirs = viewdirs / viewdirs.norm(dim=-1, keepdim=True)
@@ -176,7 +174,7 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
         return_alpha=True,
     )  # type: ignore
     alpha = alpha[..., None]
-    rgb = torch.clamp(rgb, max=1.0)
+    rgb = torch.clamp(rgb, max=1.0).detach()
     rgb = rgb.unsqueeze(0).permute(0, 3, 1, 2)
     depth_im = None
     depth_im = rasterize_gaussians(  # type: ignore
@@ -187,6 +185,6 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
     depth_im = torch.where(
         alpha > 0, depth_im / alpha, depth_im.detach().max()
     )
-    depth_im = depth_im.unsqueeze(0).permute(0, 3, 1, 2)
+    depth_im = depth_im.unsqueeze(0).permute(0, 3, 1, 2).detach()
 
     return rgb, depth_im

@@ -43,6 +43,7 @@ def transform_gaussians(pose, means, quats):
     """
     assert pose.shape == (4, 4)
     assert means.shape[0] == quats.shape[0]
+    pose = pose.to(means.device)
     means_new = (pose[:3, :3] @ means.T + pose[:3, 3:]).T
     # Rotate the Gaussians
 
@@ -53,22 +54,23 @@ def transform_gaussians(pose, means, quats):
     return means_new, quats_new
 
 
-def get_gaussian_endpts(means, scales, quats):
+def get_gaussian_endpts(means, scales, quats, n_sigma=1.0):
     """
     Get 1-sigma points along the principal axes of 3D Gaussians
 
     Args:
-        means: (N, 3) tensor of means
-        scales: (N, 3) tensor of scales
-        quats: (N, 4) tensor of quaternions
+        means (N, 3): Gaussian means
+        scales (N, 3): Gaussian log(scales)
+        quats (N, 4): Gaussian quaternions
+        n_sigma (float): number of Gaussians standard deviations to consider
 
     Returns:
-        endpts: (N, 6, 3) tensor of endpoints
+        endpts (N, 6, 3): Gaussian endpoints
     """
     assert means.shape[0] == scales.shape[0] == quats.shape[0]
     rots = quat_to_rotmat(quats)
     # Get the endpoints
-    scale_diag = torch.diag_embed(scales.exp())
+    scale_diag = torch.diag_embed(scales.exp()) * n_sigma
     scaled_axis = torch.matmul(rots, scale_diag)
     endpts = torch.zeros(means.shape[0], 6, 3, device=means.device)
     endpts[:, :3] = means.unsqueeze(1) - scaled_axis
