@@ -76,3 +76,36 @@ def get_gaussian_endpts(means, scales, quats, n_sigma=1.0):
     endpts[:, :3] = means.unsqueeze(1) - scaled_axis
     endpts[:, 3:] = means.unsqueeze(1) + scaled_axis
     return endpts
+
+
+def sample_gaussians(means, scales, quats, num_points):
+    """
+    Use 3D Gaussians as PDFs to sample 3D points
+
+    Args:
+        means (Mx3): Gaussian means
+        scales (Mx1): Gaussian scales (not log scale)
+        quats (Mx4): Gaussian quaternions (wxyz)
+        num_points (int): Number of points to sample per Gaussian
+
+    Returns:
+        points (MxNx3): Sampled points
+    """
+    assert means.shape[0] == scales.shape[0] == quats.shape[0]
+    # Sample from a standard normal dist N(0, 1)
+    std_normal_samples = torch.randn(
+        (means.shape[0], num_points, 3), device=means.device
+    )
+    # Scale the samples by the scales
+    scaled_samples = (
+        scales.unsqueeze(1).repeat(1, num_points, 1) * std_normal_samples
+    )
+    # Rotate the samples by the quaternions
+    quats = quats / quats.norm(dim=-1, keepdim=True)
+    rots = quat_to_rotmat(quats).unsqueeze(1).repeat(1, num_points, 1, 1)
+    rotated_samples = torch.einsum(
+        "...ij,...j->...i", rots, scaled_samples
+    )
+    # Translate the samples by the means
+    points = rotated_samples + means.unsqueeze(1).repeat(1, num_points, 1)
+    return points

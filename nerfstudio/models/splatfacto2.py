@@ -43,6 +43,9 @@ from nerfstudio.engine.optimizers import Optimizers
 from nerfstudio.model_components import renderers
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
+from nerfstudio.utils.gauss_utils import (
+    get_gaussian_endpts, transform_gaussians, rot2quat, sample_gaussians
+)
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.obj_3d_seg import Object3DSeg
 from nerfstudio.utils.io import read_transforms
@@ -474,7 +477,7 @@ class Splatfacto2Model(Model):
         """
         gauss_mask = mask(self.means) # gaussians to cut
         # Sample points from the out-of-mask gaussians
-        samples = self.sample_gaussians(
+        samples = sample_gaussians(
             self.means[gauss_mask], self.scales.exp()[gauss_mask],
             self.quats[gauss_mask], 500
         )
@@ -785,38 +788,6 @@ class Splatfacto2Model(Model):
         for name, param in self.gauss_params.items():
             new_dups[name] = param[dup_mask]
         return new_dups
-
-    def sample_gaussians(self, means, scales, quats, num_points):
-        """
-        Use 3D Gaussians as PDFs to sample 3D points
-
-        Args:
-            means (Mx3): Gaussian means
-            scales (Mx1): Gaussian scales (not log scale)
-            quats (Mx4): Gaussian quaternions (wxyz)
-            num_points (int): Number of points to sample per Gaussian
-
-        Returns:
-            points (MxNx3): Sampled points
-        """
-        assert means.shape[0] == scales.shape[0] == quats.shape[0]
-        # Sample from a standard normal dist N(0, 1)
-        std_normal_samples = torch.randn(
-            (means.shape[0], num_points, 3), device=means.device
-        )
-        # Scale the samples by the scales
-        scaled_samples = (
-            scales.unsqueeze(1).repeat(1, num_points, 1) * std_normal_samples
-        )
-        # Rotate the samples by the quaternions
-        quats = quats / quats.norm(dim=-1, keepdim=True)
-        rots = quat_to_rotmat(quats).unsqueeze(1).repeat(1, num_points, 1, 1)
-        rotated_samples = torch.einsum(
-            "...ij,...j->...i", rots, scaled_samples
-        )
-        # Translate the samples by the means
-        points = rotated_samples + means.unsqueeze(1).repeat(1, num_points, 1)
-        return points
 
     def fit_gaussian_batch(self, points, masks):
         """
