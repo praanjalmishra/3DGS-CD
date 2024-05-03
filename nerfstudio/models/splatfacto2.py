@@ -44,7 +44,8 @@ from nerfstudio.model_components import renderers
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils.colors import get_color
 from nerfstudio.utils.gauss_utils import (
-    get_gaussian_endpts, transform_gaussians, rot2quat, sample_gaussians
+    get_gaussian_endpts, transform_gaussians, rot2quat, sample_gaussians,
+    fit_gaussian_batch
 )
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.obj_3d_seg import Object3DSeg
@@ -167,24 +168,6 @@ def SH2RGB(sh):
     C0 = 0.28209479177387814
     return sh * C0 + 0.5
 
-
-def rot2quat(rotmat):
-    """
-    Args:
-        rotmat: rotation matrix of shape (B, 3, 3)
-    Returns:
-        quat: quaternion of shape (B, 4)
-    """
-    from scipy.spatial.transform import Rotation as R
-    rot = rotmat.cpu().numpy()
-    # Create a rotation object from the rotation matrices
-    rotation = R.from_matrix(rot)
-    # Convert to quaternions, initially in xyzw order
-    quat_xyzw = rotation.as_quat()
-    # Rearrange to wxyz order
-    quat_wxyz = np.hstack((quat_xyzw[:, -1:], quat_xyzw[:, :-1]))
-    quat_wxyz = torch.tensor(quat_wxyz).to(rotmat)
-    return quat_wxyz
 
 
 @dataclass
@@ -437,15 +420,14 @@ class Splatfacto2Model(Model):
                 self.gauss_params[name] = torch.nn.Parameter(
                     torch.zeros(new_shape, device=self.device)
                 )
-            # TODO: The fixed Gaussian params not saved in the checkpoint
             super().load_state_dict(dict, **kwargs)
 
     def state_dict(self, **kwargs):
         # Also save the fixed Gaussian params when save checkpoints
         dict = super().state_dict(**kwargs)
         param_names = [
-            "means", "scales", "quats",
-            "features_dc", "features_rest", "opacities"
+            "means", "scales", "quats", "features_dc", "features_rest",
+            "opacities"
         ]
         for p in param_names:
             dict[f"_model.gauss_params.{p}"] = torch.cat(
@@ -486,7 +468,7 @@ class Splatfacto2Model(Model):
         # We only cut the gaussians that have enough points in the mask
         enough_in_mask = in_mask.sum(dim=-1) > 50
         # Recontruct gaussians from the in-mask sampled points
-        means_rec, cov_rec = self.fit_gaussian_batch(
+        means_rec, cov_rec = fit_gaussian_batch(
             samples[enough_in_mask], in_mask[enough_in_mask]
         )
         # Extract the eigenvalues and eigenvectors from cov3d

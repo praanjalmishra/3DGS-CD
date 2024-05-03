@@ -109,3 +109,32 @@ def sample_gaussians(means, scales, quats, num_points):
     # Translate the samples by the means
     points = rotated_samples + means.unsqueeze(1).repeat(1, num_points, 1)
     return points
+
+
+def fit_gaussian_batch(points, masks):
+    """
+    Fit 3D Gaussians to a batch of points with valid masks
+
+    Args:
+        points (BxNx3): 3D points in a batch
+        masks (BxN): mask in a batch
+
+    Returns:
+        means (Bx3): Gaussian means
+        covariances (Bx3x3): Gaussian covariances
+    """
+    assert len(masks) > 0 and masks.sum(dim=-1).min() > 0
+    masks_f = masks.float()
+    masked_points = points * masks_f.unsqueeze(-1)
+    sum_masked_points = torch.sum(masked_points, dim=1)
+    count_masked_points = torch.sum(masks_f, dim=1, keepdim=True)
+    means = sum_masked_points / count_masked_points
+    # Correct the mean shape and compute demeaned points
+    demeaned = masked_points - means.unsqueeze(1)
+    # Correct broadcasting for outer products
+    outer_product = torch.einsum('bni,bnj->bnij', demeaned, demeaned)
+    weighted_outer_product = outer_product * masks_f.unsqueeze(-1).unsqueeze(-1)
+    # Ensure proper division by broadcasting count_masked_points correctly
+    covariances = torch.sum(weighted_outer_product, dim=1) \
+        / (count_masked_points.unsqueeze(-1) - 1)
+    return means, covariances
