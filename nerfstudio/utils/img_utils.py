@@ -9,6 +9,7 @@ from lightglue import LightGlue, SuperPoint
 from lightglue.utils import rbd
 from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
 from nerfstudio.utils.io import params_to_cameras
+from nerfstudio.utils.sam_utils import compute_2D_bbox
 from PIL import Image, ImageOps
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from torchvision.ops import RoIAlign, RoIPool
@@ -361,6 +362,28 @@ def batch_crop_resize(
     else:
         raise ValueError(f"Wrong interpolation type: {interpolation}")
     return op(img, rois)
+
+
+def crop_imgs_w_masks(images, masks, resize=(256, 256)):
+    """
+    Crop the images to the smallest bbox containing the masks
+
+    Args:
+        images (N, 3, H, W): Images
+        masks (N, 1, H, W): Image masks
+
+    Returns:
+        images_cropped (N, 3, H', W'): Cropped images
+    """
+    # Masks to bboxes
+    bboxes = []
+    for mask in masks:
+        point_coords = torch.nonzero(mask.squeeze())[:, [1, 0]]
+        bbox = compute_2D_bbox(point_coords.unsqueeze(0)).float()
+        bboxes.append(bbox)
+    bboxes = torch.cat(bboxes, dim=0)
+    imgs_cropped = batch_crop_resize(images, bboxes, *resize)
+    return imgs_cropped
 
 
 def rgb2rgba(rgb_files, mask_files, output_folder):
