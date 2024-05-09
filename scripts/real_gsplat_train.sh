@@ -118,6 +118,19 @@ else
   exit 1
 fi
 
+# Make the finetuning data by removing pre-train views in transforms.json file
+python $EDIT_SCRIPT -i ${DATA_FOLDER}/transforms.json \
+  -o ${DATA_FOLDER}/transforms_finetune.json --remove_pretrain
+
+# check if the previous command was successful
+if [ $? -eq 0 ]
+then
+  echo "Finetune data creation completed successfully."
+else
+  echo "Finetune data creation failed." >&2
+  exit 1
+fi
+
 
 # ------------------ Pre-Training ------------------
 while true; do
@@ -147,3 +160,10 @@ while true; do
   break
 
 done
+
+# Detect 3D change in the scene
+
+python $CHANGE_DET_SCRIPT \
+  -c ${OUTPUT_FOLDER}/$(basename ${DATA_FOLDER})/splatfacto/${current_time}/config.yml \
+  -t ${DATA_FOLDER}/transforms.json \
+  -o ${DATA_FOLDER}

@@ -66,10 +66,11 @@ def effsam_predict(rgbs, bboxes):
     return masks, scores
 
 
-def effsam_embedding(rgb):
+def effsam_embedding(rgb, upsample=True):
     """
     Get pixel-aligned image embeddings
     @param rgb (HxWx3 np.array or 1x1xHxW tensor): Image
+    @param upsample (bool): Whether to upsample the features
     @return features (1xCxHxW tensor): Pixel-aligned image embeddings
     """
     if isinstance(rgb, np.ndarray):
@@ -80,9 +81,10 @@ def effsam_embedding(rgb):
         assert rgb.dim() == 4, "Input tensor should be 1x1xHxW"
         rgb = rgb.to(device)
     features = effsam.get_image_embeddings(rgb).detach()
-    features = torch.nn.functional.interpolate(
-        features, rgb.shape[-2:], mode="bilinear", align_corners=False
-    )
+    if upsample:
+        features = torch.nn.functional.interpolate(
+            features, rgb.shape[-2:], mode="bilinear", align_corners=False
+        )
     return features
 
 
