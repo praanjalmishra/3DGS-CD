@@ -84,6 +84,7 @@ def extract_depths_at_pixels(pixels, depth):
     depth_values = depth[0, 0, pixel_indices[:, 1], pixel_indices[:, 0]]
     return depth_values.reshape(-1, 1)
 
+
 def dilate_masks(masks, kernel_size=3):
     """
     Dilate binary masks using scipy's binary_dilation.
@@ -152,6 +153,36 @@ def masks_to_focus(masks, kernel_ratio=0.15):
         focus_masks_np.append(focus_mask_np)
     focus_masks = torch.from_numpy(np.array(focus_masks_np)).to(masks)
     return focus_masks.unsqueeze(1)
+
+
+def masks_median_points(masks, num_samples=50):
+    """
+    Find median points in the given masks
+
+    Args:
+        masks (N, 1, H, W): Binary masks
+
+    Returns:
+        median_points (N, 2): Median pixel coords
+    """
+    median_points = torch.zeros(masks.shape[0], 2).to(masks.device)
+    for i, mask in enumerate(masks):
+        assert mask.sum() > 0, f"The mask {i} has no white pixels"
+        # Get indices of all ones in the masks
+        y, x = torch.nonzero(masks[i, 0], as_tuple=True)
+        # Sample points in mask to avoid OOM
+        if y.numel() > num_samples:
+            sampled_indices = torch.randperm(y.numel())[:num_samples]
+            y = y[sampled_indices]
+            x = x[sampled_indices]
+        coords = torch.stack((y, x), dim=1).float()
+        # Median point is the point that has the minimum dist to other points
+        dist_matrix = torch.cdist(coords, coords, p=2)
+        sum_distances = dist_matrix.sum(dim=0)
+        min_index = sum_distances.argmin()
+        median_points[i, 0] = y[min_index]
+        median_points[i, 1] = x[min_index]
+    return median_points
 
 
 def points2D_to_mask(points2D, valid2D, H, W):
