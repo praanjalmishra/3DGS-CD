@@ -155,6 +155,29 @@ def masks_to_focus(masks, kernel_ratio=0.15):
     return focus_masks.unsqueeze(1)
 
 
+def median_high_dim(vectors, num_samples=50):
+    """
+    Compute the median of high-dimensional vectors
+
+    Args:
+        vectors (N, D): High-dimensional vectors
+
+    Returns:
+        median (D): Median vector
+    """
+    assert vectors.dim() == 2, "Vectors must be NxD"
+    # Sample points in mask to avoid OOM
+    if vectors.shape[0] > num_samples:
+        sampled_indices = torch.randperm(vectors.shape[0])[:num_samples]
+        vectors = vectors[sampled_indices]
+    # Median vector is the vector that has the minimum dist to other points
+    dist_matrix = torch.cdist(vectors, vectors, p=2)
+    sum_distances = dist_matrix.sum(dim=0)
+    min_index = sum_distances.argmin()
+    median = vectors[min_index]
+    return median
+
+
 def masks_median_points(masks, num_samples=50):
     """
     Find median points in the given masks
@@ -170,18 +193,8 @@ def masks_median_points(masks, num_samples=50):
         assert mask.sum() > 0, f"The mask {i} has no white pixels"
         # Get indices of all ones in the masks
         y, x = torch.nonzero(masks[i, 0], as_tuple=True)
-        # Sample points in mask to avoid OOM
-        if y.numel() > num_samples:
-            sampled_indices = torch.randperm(y.numel())[:num_samples]
-            y = y[sampled_indices]
-            x = x[sampled_indices]
-        coords = torch.stack((y, x), dim=1).float()
-        # Median point is the point that has the minimum dist to other points
-        dist_matrix = torch.cdist(coords, coords, p=2)
-        sum_distances = dist_matrix.sum(dim=0)
-        min_index = sum_distances.argmin()
-        median_points[i, 0] = y[min_index]
-        median_points[i, 1] = x[min_index]
+        yx = torch.stack((y, x), dim=1).float()
+        median_points[i] = median_high_dim(yx, num_samples=num_samples)
     return median_points
 
 
@@ -478,3 +491,24 @@ def get_interest_region(rgbs, masks, iteration=10):
     # Dilate the feature point masks
     masks_interest = dilate_masks(masks_interest, kernel_size=iteration)
     return masks_interest
+
+
+if __name__ == "__main__":
+    from nerfstudio.utils.io import read_masks
+    from matplotlib import pyplot as plt
+
+    # Load a mask image
+    masks = read_masks(["/home/ziqi/Desktop/test/Liar2/masks_new/mask_00001.png"])
+    sampled_median_points = masks_median_points(masks, 100)
+    N = masks.shape[0]
+
+    fig, axes = plt.subplots(1, 1, figsize=(20, 4))
+    axes.imshow(masks[0, 0], cmap='gray')
+    median_y, median_x = sampled_median_points[0]
+    axes.scatter(
+        median_x, median_y, color='red', s=50, label='Sampled Median Point'
+    )
+    axes.set_title(f'Mask {0+1}')
+    axes.axis('off')
+    axes.legend()
+    plt.savefig("/home/ziqi/Desktop/test/mask_median_points.png")
