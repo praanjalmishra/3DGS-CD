@@ -14,6 +14,7 @@ from lightglue import viz2d
 from matplotlib import pyplot as plt
 from PIL import Image
 from pyquaternion import Quaternion
+from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
 from nerfstudio.cameras.camera_paths import get_path_from_json
@@ -24,7 +25,7 @@ from nerfstudio.utils.debug_utils import (
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
-    extract_depths_at_pixels, image_align, image_matching, undistort_images
+    extract_depths_at_pixels, image_align, image_matching, median_high_dim
 )
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
@@ -183,6 +184,80 @@ class ChangeDet:
         #         mask.squeeze().cpu().numpy()
         #     )
         return masks
+    def match_move_in_out(
+        self, rgb_render, rgb_capture, masks_move_out, masks_move_in
+    ):
+        """
+        Match move-in and move-out masks between rendered and captured images
+
+        Args:
+            rgb_render (1x3xHxW): Rendered RGB image
+            rgb_capture (1x3xHxW): Captured RGB image
+            masks_move_out (Mx1xHxW): Move-out masks
+            masks_move_in (Mx1xHxW): Move-in masks
+        
+        Returns:
+            matches (Mx2): Matched move-out and move-in masks
+        """
+        assert rgb_render.shape[:2] == (1, 3)
+        assert rgb_render.shape == rgb_capture.shape
+        assert masks_move_out.shape[1] == 1
+        device = rgb_render.device
+        # Extract image embeddings
+        emb_render = effsam_embedding(rgb_render, upsample=False)
+        emb_capture = effsam_embedding(rgb_capture, upsample=False)
+        # Downsample the masks to embeddings size
+        masks_move_out = torch.nn.functional.interpolate(
+            masks_move_out.float(), size=emb_render.shape[-2:], mode="nearest"
+        ).bool()
+        masks_move_in = torch.nn.functional.interpolate(
+            masks_move_in.float(), size=emb_render.shape[-2:], mode="nearest"
+        ).bool()
+        # Extract the median of the embeddings for the move-out and -in masks
+        emb_median_move_out, emb_median_move_in = [], []
+        edim = emb_render.shape[1]
+        for m in masks_move_out:
+            emb_move_out = emb_render[0][m.repeat(edim, 1, 1)]
+            emb_move_out = emb_move_out.reshape(edim, -1).permute(1, 0)
+            emb_median_move_out.append(median_high_dim(emb_move_out, 100))
+        for m in masks_move_in:
+            emb_move_in = emb_capture[0][m.repeat(edim, 1, 1)]
+            emb_move_in = emb_move_in.reshape(edim, -1).permute(1, 0)
+            emb_median_move_in.append(median_high_dim(emb_move_in, 100))
+        emb_median_move_out = torch.stack(emb_median_move_out)
+        emb_median_move_in = torch.stack(emb_median_move_in)
+        # Calculate the cosine similarity between the embeddings
+        similarity_map = torch.nn.functional.cosine_similarity(
+            emb_median_move_out.unsqueeze(1),
+            emb_median_move_in.unsqueeze(0), dim=-1
+        )
+        # Nearest neighbor matching w/ Hungarian algorithm
+        num_move_out = similarity_map.size(0)
+        num_move_in = similarity_map.size(1)
+        # Add null hypotheses, cosine sim score set to 0.3
+        similarity_map = torch.cat((
+            similarity_map, 
+            0.3 * torch.ones(num_move_out, num_move_out).to(device)
+        ), dim=-1)
+        similarity_map = similarity_map.cpu().numpy()
+        # print(similarity_map)
+        row_ind, col_ind = linear_sum_assignment(1-similarity_map)
+        matches = torch.stack(
+            (torch.tensor(row_ind), torch.tensor(col_ind)), dim=-1
+        ).to(device)
+        # Unmatched move-in mask index to -1
+        matches[:, 1][matches[:, 1] >= num_move_in] = -1
+        # Unmatched move_out mask index to -1
+        present_indices = matches[:, 1][matches[:, 1] >= 0]
+        missing_indices = torch.tensor(
+            [i for i in range(num_move_in) if i not in present_indices]
+        ).to(device)
+        new_rows = torch.stack(
+            (-torch.ones_like(missing_indices), missing_indices), dim=-1
+        )
+        matches = torch.cat((matches, new_rows), dim=0)
+        return matches
+
 
     def pretrain_iteration(self, rgbs, masks, cameras):
         """
