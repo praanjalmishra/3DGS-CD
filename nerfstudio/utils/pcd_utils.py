@@ -1,5 +1,8 @@
 # Point cloud processing functions for for NeRFacto2
+import cv2
 import torch
+from scipy.spatial import ConvexHull
+from scipy.spatial.distance import cdist
 
 
 def compute_point_cloud(depths, poses, Ks, masks):
@@ -62,10 +65,54 @@ def point_cloud_filtering(point_cloud, percentile_threshold=0.90):
     # Compute distances of all points to the centroid
     distances = torch.norm(point_cloud - centroid, dim=-1)
     # Filter out the paints that are beyond the 95% percentile
-    threshold_distance = torch.quantile (distances, percentile_threshold)
+    threshold_distance = torch.quantile(distances, percentile_threshold)
     inlier_mask = distances < threshold_distance
     point_cloud_inliers = point_cloud[inlier_mask]
     return point_cloud_inliers
+
+
+def nn_distance(point_cloud1, point_cloud2):
+    """
+    Efficiently compute the approximate NN distance between two point clouds
+
+    Args:
+        point_cloud1 (N, 3): First point cloud
+        point_cloud2 (M, 3): Second point cloud
+    
+    Returns:
+        distances (float): Nearest neighbor distance
+    """
+    assert point_cloud1.shape[-1] == 3
+    assert point_cloud2.shape[-1] == 3
+    # import time
+    # start = time.time()
+    index_params = dict(algorithm = 1, trees = 1)  # KDTree
+    search_params = dict(checks = 2) 
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    flann.add([point_cloud1.cpu().numpy()])
+    flann.train()
+    # Find the nearest neighbors
+    matches = flann.match(point_cloud2.cpu().numpy())
+    smallest_distance = min(match.distance for match in matches)
+    # print(f"KDTree query time: {time.time() - start}")
+    return smallest_distance
+
+
+def pcd_size(pcd):
+    """
+    Efficiently compute the maximum distance between two points in a pcd
+
+    Args:
+        pcd (Nx3): point cloud
+
+    Returns:
+        max_dist (float): Maximum distance between two points in a pcd
+    """
+    # Max-distance points must lie on the convex hull
+    hull = ConvexHull(pcd.cpu().numpy())
+    hullpoints = pcd.cpu().numpy()[hull.vertices, :]
+    hdist = cdist(hullpoints, hullpoints, metric='euclidean')
+    return hdist.max()
 
 
 def transform_point_cloud(point_cloud, transform_matrix): 
