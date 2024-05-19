@@ -184,8 +184,157 @@ class ChangeDet:
         #         mask.squeeze().cpu().numpy()
         #     )
         return masks
+
+    def effsam_embedding_masked(self, rgb, masks, flip=True):
+        """
+        Extract the representative effsam embedding for masks in an RGB image
+
+        Args:
+            rgb (1x3xHxW): an RGB image
+            mask (Mx1xHxW): masks
+            flip (bool): whether to flip the image
+        
+        Returns:
+            embs (MxC): median embeddings within the masks
+        """
+        emb = effsam_embedding(rgb, upsample=False)
+        masks = torch.nn.functional.interpolate(
+            masks.float(), size=emb.shape[-2:], mode="nearest"
+        ).bool()
+        embs = []
+        for m in masks:
+            emb_mask = emb[0][m.repeat(emb.shape[1], 1, 1)]
+            emb_mask = emb_mask.reshape(emb.shape[1], -1).permute(1, 0)
+            embs.append(emb_mask)
+        if flip:
+            emb_flip = effsam_embedding(torch.flip(rgb, [-1]), upsample=False)
+            masks_flip = torch.flip(masks, [-1])
+            for ii, m in enumerate(masks_flip):
+                emb_mask = emb_flip[0][m.repeat(emb_flip.shape[1], 1, 1)]
+                emb_mask = emb_mask.reshape(emb.shape[1], -1).permute(1, 0)
+                embs[ii] = torch.cat((embs[ii], emb_mask), dim=0)
+        emb_median = torch.stack(
+            [median_high_dim(e, 500) for e in embs], dim=0
+        )
+        return emb_median
+
+    def match_move_out(self, rgbs, depths, masks, poses, Ks):
+        """
+        Match move-out masks across multiple images
+
+        Args:
+            rgbs (Nx3xHxW): RGB images
+            depths (Nx1xHxW): Depth images
+            masks (N-list of Mx1xHxW): Sampling masks
+            poses (Nx4x4): Camera poses wrt world
+            Ks (Nx3x3): Camera intrinsics
+
+        Returns:
+            pcds (K-list of Lx3): Object point clouds
+            pcd_embs (K-list of TxC): Object SuperPoint descriptors
+        """
+        assert rgbs.shape[1] == 3
+        assert depths.shape[1] == 1
+        assert poses.shape[1:] == (4, 4)
+        assert Ks.shape[1:] == (3, 3)
+        assert len(rgbs) == len(depths) == len(masks) == len(poses) == len(Ks)
+        device = rgbs.device
+        N = len(rgbs)
+        # Extract image embeddings
+        embeds = []
+        for i in range(N):
+            emb_median = self.effsam_embedding_masked(rgbs[i:i+1], masks[i])
+            embeds.append(emb_median)
+        # Initialize object pcds
+        pcds, pcd_sizes, pcd_counts, pcd_embs = [], [], [], []
+        for j in range(len(masks[0])):
+            pcd = compute_point_cloud(
+                depths[0:1], poses[0:1], Ks[0:1], masks[0][j:j+1]
+            )
+            pcd = point_cloud_filtering(pcd, 0.95)
+            pcds.append(pcd)
+            pcd_sizes.append(pcd_size(pcd))
+            pcd_counts.append(1)
+            pcd_embs.append(embeds[0][j:j+1])
+        # Associate move-out masks with the object point clouds w/ NN matching
+        for i in range(1, N):
+            dist_mat = torch.tensor(pcd_sizes).reshape(-1, 1).to(device)
+            dist_mat = dist_mat.repeat(1, len(masks[i]) + len(pcds))
+            new_pcds = []
+            for j in range(len(masks[i])):
+                pcd = compute_point_cloud(
+                    depths[i:i+1], poses[i:i+1], Ks[i:i+1], masks[i][j:j+1]
+                )
+                pcd = point_cloud_filtering(pcd, 0.95)
+                for k in range(len(pcds)):
+                    dist_mat[k, j] = nn_distance(pcds[k], pcd)
+                new_pcds.append(pcd)
+            # print(f"dist_mat:\n {dist_mat.cpu().numpy()}")
+            row_ind, col_ind = linear_sum_assignment(dist_mat.cpu().numpy())
+            # print(f"row_ind: {row_ind}, col_ind: {col_ind}")
+            # Update existing object point clouds
+            for r, c in zip(row_ind, col_ind):
+                if c < len(masks[i]):
+                    pcds[r] = torch.cat((pcds[r], new_pcds[c]), dim=0)
+                    pcd_sizes[r] = pcd_size(pcds[r])
+                    pcd_counts[r] += 1
+                    pcd_embs[r] = torch.cat(
+                        (pcd_embs[r], embeds[i][c:c+1]), dim=0
+                    )
+            # Add new object point clouds
+            for k in range(len(masks[i])):
+                if k not in col_ind:
+                    pcds.append(new_pcds[k])
+                    pcd_sizes.append(pcd_size(new_pcds[k]))
+                    pcd_counts.append(1)
+                    pcd_embs.append(embeds[i][k:k+1])
+        # Filter out object point clouds that appear in <25% of images
+        pcds = [p for p, ct in zip(pcds, pcd_counts) if ct > N * 0.25]
+        pcd_embs = [e for e, ct in zip(pcd_embs, pcd_counts) if ct > N * 0.25]
+        return pcds, pcd_embs
+
+    def match_pcd_move_in(self, pcd_embs, capture, masks, threshold=0.4):
+        """
+        Associate object point clouds with move-in masks
+
+        Args:
+            pcd_embs (K list of TxC): Object embeddings
+            capture (1x3xHxW): Captured RGB image
+            masks (Mx1xHxW): Move-in masks
+            threshold (float): Threshold for cos sim below which unmatched
+
+        Returns:
+            match_ind (M-list): Matched object pcd indices (-1 if unmatched)
+        """
+        assert capture.shape[:2] == (1, 3)
+        assert masks.shape[1] == 1
+        device = capture.device
+        emb_move_in = self.effsam_embedding_masked(capture, masks)
+        # Calculate the smallest cos sim between
+        sim_map = []
+        for emb in pcd_embs:
+            sim = torch.nn.functional.cosine_similarity(
+                emb_move_in.unsqueeze(1), emb.unsqueeze(0), dim=-1
+            )
+            sim = torch.max(sim, dim=-1, keepdim=True).values
+            sim_map.append(sim)
+        sim_map = torch.cat(sim_map, dim=-1)
+        # Add null hypotheses, cosine sim score set to 0.4
+        num_move_in = sim_map.size(0)
+        sim_map = torch.cat((
+            sim_map, 
+            threshold * torch.ones(num_move_in, num_move_in).to(device)
+        ), dim=-1)
+        print(f"sim_map:\n {sim_map.cpu().numpy()}")
+        _, col_ind = linear_sum_assignment(1-sim_map.cpu().numpy())
+        match_ind = torch.tensor(col_ind).to(device)
+        # Unmatched move-in mask index to -1
+        match_ind[match_ind >= len(pcd_embs)] = -1
+        return match_ind
+
     def match_move_in_out(
-        self, rgb_render, rgb_capture, masks_move_out, masks_move_in
+        self, rgb_render, rgb_capture, masks_move_out, masks_move_in,
+        threshold=0.4
     ):
         """
         Match move-in and move-out masks between rendered and captured images
@@ -195,37 +344,21 @@ class ChangeDet:
             rgb_capture (1x3xHxW): Captured RGB image
             masks_move_out (Mx1xHxW): Move-out masks
             masks_move_in (Mx1xHxW): Move-in masks
+            threshold (float): Threshold for cosine similarity for unmatching
         
         Returns:
-            matches (Mx2): Matched move-out and move-in masks
+            matches (Mx2): Matched move-out and move-in masks (-1 if unmatched)
         """
         assert rgb_render.shape[:2] == (1, 3)
         assert rgb_render.shape == rgb_capture.shape
         assert masks_move_out.shape[1] == 1
         device = rgb_render.device
-        # Extract image embeddings
-        emb_render = effsam_embedding(rgb_render, upsample=False)
-        emb_capture = effsam_embedding(rgb_capture, upsample=False)
-        # Downsample the masks to embeddings size
-        masks_move_out = torch.nn.functional.interpolate(
-            masks_move_out.float(), size=emb_render.shape[-2:], mode="nearest"
-        ).bool()
-        masks_move_in = torch.nn.functional.interpolate(
-            masks_move_in.float(), size=emb_render.shape[-2:], mode="nearest"
-        ).bool()
-        # Extract the median of the embeddings for the move-out and -in masks
-        emb_median_move_out, emb_median_move_in = [], []
-        edim = emb_render.shape[1]
-        for m in masks_move_out:
-            emb_move_out = emb_render[0][m.repeat(edim, 1, 1)]
-            emb_move_out = emb_move_out.reshape(edim, -1).permute(1, 0)
-            emb_median_move_out.append(median_high_dim(emb_move_out, 100))
-        for m in masks_move_in:
-            emb_move_in = emb_capture[0][m.repeat(edim, 1, 1)]
-            emb_move_in = emb_move_in.reshape(edim, -1).permute(1, 0)
-            emb_median_move_in.append(median_high_dim(emb_move_in, 100))
-        emb_median_move_out = torch.stack(emb_median_move_out)
-        emb_median_move_in = torch.stack(emb_median_move_in)
+        emb_median_move_out = self.effsam_embedding_masked(
+            rgb_render, masks_move_out
+        )
+        emb_median_move_in = self.effsam_embedding_masked(
+            rgb_capture, masks_move_in
+        )
         # Calculate the cosine similarity between the embeddings
         similarity_map = torch.nn.functional.cosine_similarity(
             emb_median_move_out.unsqueeze(1),
@@ -234,13 +367,13 @@ class ChangeDet:
         # Nearest neighbor matching w/ Hungarian algorithm
         num_move_out = similarity_map.size(0)
         num_move_in = similarity_map.size(1)
-        # Add null hypotheses, cosine sim score set to 0.3
+        # Add null hypotheses, cosine sim score set to 0.4
         similarity_map = torch.cat((
             similarity_map, 
-            0.3 * torch.ones(num_move_out, num_move_out).to(device)
+            threshold * torch.ones(num_move_out, num_move_out).to(device)
         ), dim=-1)
         similarity_map = similarity_map.cpu().numpy()
-        # print(similarity_map)
+        # print(f"sim_map:\n {similarity_map}")
         row_ind, col_ind = linear_sum_assignment(1-similarity_map)
         matches = torch.stack(
             (torch.tensor(row_ind), torch.tensor(col_ind)), dim=-1
