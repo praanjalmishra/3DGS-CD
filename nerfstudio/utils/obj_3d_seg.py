@@ -2,8 +2,13 @@ import itertools
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+import pycolmap
 
+from lightglue.utils import rbd
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from nerfstudio.utils.img_utils import points2D_to_point_masks
+from nerfstudio.utils.proj_utils import project_points
+from pyquaternion import Quaternion
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from skimage.measure import marching_cubes
 
@@ -306,3 +311,112 @@ class Object3DSeg:
         ax.set_ylabel('Y Label')
         ax.set_zlabel('Z Label')
         plt.savefig(f"{output_dir}/occ_grid.png")
+
+
+class Obj3DFeats:
+    """
+    Object's multiview SuperPoint features
+    """
+    def __init__(self, feats=[], pts3D=[]):
+        """
+        Args:
+            feats (dict): SuperPoint feature dict
+        """
+        self.feats = feats
+        self.pts3D = pts3D
+        assert len(feats) == len(pts3D)
+        assert all(
+            [feats['keypoints'].shape[1] == pts.shape[0] 
+            for feats, pts in zip(feats, pts3D)]
+        )
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+    
+    def add_feats(self, feats, pts3D):
+        """
+        Add features to the object
+
+        Args:
+            feats (dict): SuperPoint feature dict from a view
+            pts3D (Nx3 tensor): 3D points corresponding to the features
+        """
+        assert feats['keypoints'].shape[1] == pts3D.shape[0]
+        self.feats.append(feats)
+        self.pts3D.append(pts3D)
+
+    def match(self, feats, matcher=None):
+        """
+        Match features with the object features
+
+        Args:
+            feats (dict): SuperPoint feature dict for 2D image points
+            matcher (LightGlue.Matcher): Feature matcher
+        
+        Returns:
+            matched3D (Nx3): Matched 3D points
+            matched2D (Nx2): Matched 2D points
+        """
+        assert len(self.feats) > 0, "No features to match"
+        # TODO: have to take matcher as input
+        if matcher is None:
+            from lightglue import LightGlue            
+            matcher = LightGlue(features='superpoint').eval().to(self.device)
+        matched_pts3D, matches = [], []
+        for obj_feats, obj_pts3D in zip(self.feats, self.pts3D): 
+            mm = matcher({'image0': obj_feats, 'image1': feats})
+            _, _, mm = [rbd(x) for x in [obj_feats, feats, mm]]
+            matched3D = obj_pts3D[mm["matches"][:, 0]]
+            matches.append(mm["matches"][:, 1])
+            matched_pts3D.append(matched3D)
+        matches = torch.cat(matches, dim=0)
+        matched_pts3D = torch.cat(matched_pts3D, dim=0)
+        # TODO: handle duplicate matches by comparing 
+        matched_pts2D = feats["keypoints"][0][matches]
+        return matched_pts2D, matched_pts3D
+    
+    def PnP(self, feats, K, H, W, matcher=None, verbose=False):
+        """
+        Solve PnP problem to estimate cam-to-obj pose
+
+        Args:
+            feats (dict): SuperPoint feature dict
+            K (3x3): Camera intrinsics
+            matcher (LightGlue.Matcher): Feature matcher
+        
+        Returns:
+            pose (4x4 tensor): Camera-to-obj pose
+            num_inliers (int): Number of inliers
+            num_matches (int): Number of matches
+        """
+
+        assert K.shape == (3, 3)
+        matched_pts2D, matched_pts3D = self.match(feats, matcher)
+        matched_pts2D = matched_pts2D.cpu().numpy()
+        matched_pts3D = matched_pts3D.cpu().numpy()
+        if matched_pts3D.shape[0] < 4:
+            print("Warn: Not enough points for PnP")
+            return None, 0.0, 0
+        pycolmap_cam = pycolmap.Camera(
+            model='OPENCV', width=W, height=H,
+            params=[K[0, 0], K[1, 1], K[0, -1], K[1, -1], 0, 0, 0, 0]
+        )
+        ret = pycolmap.absolute_pose_estimation(
+            matched_pts2D, matched_pts3D, pycolmap_cam,
+            estimation_options={'ransac': {'max_error': 12.0}}, 
+            refinement_options={'print_summary': verbose}
+        )
+        if not ret['success']:
+            print("Warn: PnP failed!!")
+            return None, 0.0, 0
+        R_mat = torch.tensor(Quaternion(*ret['qvec']).rotation_matrix)
+        tvec = torch.tensor(ret['tvec'])
+        pose = torch.eye(4, device=K.device)
+        pose[:3, :3], pose[:3, 3] = R_mat, tvec
+        pose = pose.inverse()
+        if verbose:
+            print(
+                f"Number of inliers: {ret['num_inliers']}/{len(matched_pts2D)}"
+            )
+            print(f"pose est:\n {pose}")
+        return pose, ret["num_inliers"], len(matched_pts2D)

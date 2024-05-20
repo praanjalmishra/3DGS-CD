@@ -73,7 +73,7 @@ def extract_depths_at_pixels(pixels, depth):
     Extract depth values for pixel coordinates from the depth map.
 
     Parameters
-        pixels: (N, 3) Pixel coordinates
+        pixels: (N, 2) Pixel coordinates
         depth: (1, 1, H, W) Depth map of the image
 
     Returns:
@@ -283,7 +283,10 @@ def filter_features_with_mask(feats, masks):
     return feats
 
 
-def image_matching(imgs1, imgs2, masks1=None, masks2=None, flip=False):
+def image_matching(
+    imgs1, imgs2, masks1=None, masks2=None, flip=False,
+    extractor=None, matcher=None
+):
     """
     Match imgs1 and imgs2 using their respective masks
     and return the keypoints and matches.
@@ -300,8 +303,10 @@ def image_matching(imgs1, imgs2, masks1=None, masks2=None, flip=False):
     """
     device = imgs1.device
     # Load extractor and matcher modules
-    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
-    matcher = LightGlue(features='superpoint').eval().to(device)
+    if extractor is None:
+        extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    if matcher is None:
+        matcher = LightGlue(features='superpoint').eval().to(device)
 
     if flip:
         # Rotate images by 180 degrees if flip is True

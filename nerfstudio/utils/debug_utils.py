@@ -139,3 +139,19 @@ def debug_masks(masks, debug_dir):
     for i, mask in enumerate(tqdm(masks, desc="Save masks")):
         mask = (mask.squeeze() * 255).byte().cpu().numpy()
         Image.fromarray(mask).save(f"{debug_dir}/mask_{i}.png")
+
+
+def debug_depths(depths, debug_dir):
+    """
+    Save torch depths as images
+
+    Args:
+        depths (Nx1xHxW): Depth maps
+        debug_dir (str): Directory to save the images
+    """
+    assert os.path.isdir(debug_dir)
+    assert len(depths.shape) == 4 and depths.shape[1] == 1
+    for i, depth in enumerate(tqdm(depths, desc="Save depths")):
+        depth = depth / depth.max()
+        depth = (depth.squeeze() * 255).byte().cpu().numpy()
+        Image.fromarray(depth).save(f"{debug_dir}/depth_{i}.png")

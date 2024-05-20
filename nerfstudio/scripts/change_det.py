@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import pycolmap
 import torch
-from lightglue import viz2d
+from lightglue import LightGlue, SuperPoint, viz2d
 from matplotlib import pyplot as plt
 from PIL import Image
 from pyquaternion import Quaternion
@@ -21,11 +21,14 @@ from nerfstudio.cameras.camera_paths import get_path_from_json
 from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.utils.debug_utils import (
-    debug_image_pairs, debug_images, debug_masks, debug_matches
+    debug_image_pairs, debug_images, debug_masks, debug_matches,
+    debug_point_cloud
+)
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
-    extract_depths_at_pixels, image_align, image_matching, median_high_dim
+    extract_depths_at_pixels, image_align, image_matching,
+    filter_features_with_mask
 )
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
@@ -99,6 +102,10 @@ class ChangeDet:
     """Directory to save debug output"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     """Device"""
+    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    """SuperPoint extractor"""
+    matcher = LightGlue(features='superpoint').eval().to(device)
+    """LightGlue matcher"""
 
     def __init__(self, load_config: Path, output_dir: Path):
         # Path to the config.yml file of the pretrained 3DGS
@@ -185,38 +192,30 @@ class ChangeDet:
         #     )
         return masks
 
-    def effsam_embedding_masked(self, rgb, masks, flip=True):
+    def get_features_in_masks(self, rgbs, masks):
         """
-        Extract the representative effsam embedding for masks in an RGB image
+        Extract SuperPoint descriptors in the masked regions
 
         Args:
-            rgb (1x3xHxW): an RGB image
-            mask (Mx1xHxW): masks
-            flip (bool): whether to flip the image
-        
+            rgbs (Nx3xHxW): RGB images
+            masks (N-list of Mx1xHxW): Image masks
+
         Returns:
-            embs (MxC): median embeddings within the masks
+            feats (N-list of M-list of TxC): SuperPoint descriptors
         """
-        emb = effsam_embedding(rgb, upsample=False)
-        masks = torch.nn.functional.interpolate(
-            masks.float(), size=emb.shape[-2:], mode="nearest"
-        ).bool()
-        embs = []
-        for m in masks:
-            emb_mask = emb[0][m.repeat(emb.shape[1], 1, 1)]
-            emb_mask = emb_mask.reshape(emb.shape[1], -1).permute(1, 0)
-            embs.append(emb_mask)
-        if flip:
-            emb_flip = effsam_embedding(torch.flip(rgb, [-1]), upsample=False)
-            masks_flip = torch.flip(masks, [-1])
-            for ii, m in enumerate(masks_flip):
-                emb_mask = emb_flip[0][m.repeat(emb_flip.shape[1], 1, 1)]
-                emb_mask = emb_mask.reshape(emb.shape[1], -1).permute(1, 0)
-                embs[ii] = torch.cat((embs[ii], emb_mask), dim=0)
-        emb_median = torch.stack(
-            [median_high_dim(e, 500) for e in embs], dim=0
-        )
-        return emb_median
+        assert rgbs.shape[1] == 3 and len(rgbs) == len(masks)
+        feats_all = []
+        for i in range(len(rgbs)):
+            feat_i = []
+            for j in range(len(masks[i])):
+                feat = self.extractor.extract(rgbs[i])
+                # Ensure keypoints are within image
+                feat["keypoints"].clamp_(min=0)
+                # Filter keypoints using masks
+                feat = filter_features_with_mask(feat, masks[i][j:j+1])
+                feat_i.append(feat)
+            feats_all.append(feat_i)
+        return feats_all
 
     def match_move_out(self, rgbs, depths, masks, poses, Ks):
         """
@@ -231,7 +230,7 @@ class ChangeDet:
 
         Returns:
             pcds (K-list of Lx3): Object point clouds
-            pcd_embs (K-list of TxC): Object SuperPoint descriptors
+            pcd_feats (K-list of Obj3DFeats): Object SuperPoint descriptors
         """
         assert rgbs.shape[1] == 3
         assert depths.shape[1] == 1
@@ -240,13 +239,19 @@ class ChangeDet:
         assert len(rgbs) == len(depths) == len(masks) == len(poses) == len(Ks)
         device = rgbs.device
         N = len(rgbs)
-        # Extract image embeddings
-        embeds = []
-        for i in range(N):
-            emb_median = self.effsam_embedding_masked(rgbs[i:i+1], masks[i])
-            embeds.append(emb_median)
+        def compute_feats_3D(feats, depth, pose, K):
+            # Extract 3D positions of keypoints
+            depths_at_kps = extract_depths_at_pixels(
+                feats["keypoints"].squeeze(), depth
+            )
+            pts_at_kps = depths_to_points(
+                feats["keypoints"].squeeze(), depths_at_kps, pose, K
+            )
+            return pts_at_kps
+        # Extract SuperPoint descriptors in multi-view masked RGB images
+        feats = self.get_features_in_masks(rgbs, masks)
         # Initialize object pcds
-        pcds, pcd_sizes, pcd_counts, pcd_embs = [], [], [], []
+        pcds, pcd_sizes, pcd_counts, pcd_feats = [], [], [], []
         for j in range(len(masks[0])):
             pcd = compute_point_cloud(
                 depths[0:1], poses[0:1], Ks[0:1], masks[0][j:j+1]
@@ -255,7 +260,11 @@ class ChangeDet:
             pcds.append(pcd)
             pcd_sizes.append(pcd_size(pcd))
             pcd_counts.append(1)
-            pcd_embs.append(embeds[0][j:j+1])
+            # Extract 3D positions of keypoints
+            pts3D = compute_feats_3D(
+                feats[0][j], depths[0:1], poses[0], Ks[0]
+            )
+            pcd_feats.append(Obj3DFeats([feats[0][j]], [pts3D]))
         # Associate move-out masks with the object point clouds w/ NN matching
         for i in range(1, N):
             dist_mat = torch.tensor(pcd_sizes).reshape(-1, 1).to(device)
@@ -278,119 +287,26 @@ class ChangeDet:
                     pcds[r] = torch.cat((pcds[r], new_pcds[c]), dim=0)
                     pcd_sizes[r] = pcd_size(pcds[r])
                     pcd_counts[r] += 1
-                    pcd_embs[r] = torch.cat(
-                        (pcd_embs[r], embeds[i][c:c+1]), dim=0
+                    pts3D = compute_feats_3D(
+                        feats[i][c], depths[i:i+1], poses[i], Ks[i]
                     )
+                    pcd_feats[r].add_feats(feats[i][c], pts3D)
             # Add new object point clouds
             for k in range(len(masks[i])):
                 if k not in col_ind:
                     pcds.append(new_pcds[k])
                     pcd_sizes.append(pcd_size(new_pcds[k]))
                     pcd_counts.append(1)
-                    pcd_embs.append(embeds[i][k:k+1])
+                    pts3D = compute_feats_3D(
+                        feats[i][k], depths[i:i+1], poses[i], Ks[i]
+                    )
+                    pcd_feats.append(Obj3DFeats(feats[i][k], pts3D))
         # Filter out object point clouds that appear in <25% of images
         pcds = [p for p, ct in zip(pcds, pcd_counts) if ct > N * 0.25]
-        pcd_embs = [e for e, ct in zip(pcd_embs, pcd_counts) if ct > N * 0.25]
-        return pcds, pcd_embs
-
-    def match_pcd_move_in(self, pcd_embs, capture, masks, threshold=0.4):
-        """
-        Associate object point clouds with move-in masks
-
-        Args:
-            pcd_embs (K list of TxC): Object embeddings
-            capture (1x3xHxW): Captured RGB image
-            masks (Mx1xHxW): Move-in masks
-            threshold (float): Threshold for cos sim below which unmatched
-
-        Returns:
-            match_ind (M-list): Matched object pcd indices (-1 if unmatched)
-        """
-        assert capture.shape[:2] == (1, 3)
-        assert masks.shape[1] == 1
-        device = capture.device
-        emb_move_in = self.effsam_embedding_masked(capture, masks)
-        # Calculate the smallest cos sim between
-        sim_map = []
-        for emb in pcd_embs:
-            sim = torch.nn.functional.cosine_similarity(
-                emb_move_in.unsqueeze(1), emb.unsqueeze(0), dim=-1
-            )
-            sim = torch.max(sim, dim=-1, keepdim=True).values
-            sim_map.append(sim)
-        sim_map = torch.cat(sim_map, dim=-1)
-        # Add null hypotheses, cosine sim score set to 0.4
-        num_move_in = sim_map.size(0)
-        sim_map = torch.cat((
-            sim_map, 
-            threshold * torch.ones(num_move_in, num_move_in).to(device)
-        ), dim=-1)
-        print(f"sim_map:\n {sim_map.cpu().numpy()}")
-        _, col_ind = linear_sum_assignment(1-sim_map.cpu().numpy())
-        match_ind = torch.tensor(col_ind).to(device)
-        # Unmatched move-in mask index to -1
-        match_ind[match_ind >= len(pcd_embs)] = -1
-        return match_ind
-
-    def match_move_in_out(
-        self, rgb_render, rgb_capture, masks_move_out, masks_move_in,
-        threshold=0.4
-    ):
-        """
-        Match move-in and move-out masks between rendered and captured images
-
-        Args:
-            rgb_render (1x3xHxW): Rendered RGB image
-            rgb_capture (1x3xHxW): Captured RGB image
-            masks_move_out (Mx1xHxW): Move-out masks
-            masks_move_in (Mx1xHxW): Move-in masks
-            threshold (float): Threshold for cosine similarity for unmatching
-        
-        Returns:
-            matches (Mx2): Matched move-out and move-in masks (-1 if unmatched)
-        """
-        assert rgb_render.shape[:2] == (1, 3)
-        assert rgb_render.shape == rgb_capture.shape
-        assert masks_move_out.shape[1] == 1
-        device = rgb_render.device
-        emb_median_move_out = self.effsam_embedding_masked(
-            rgb_render, masks_move_out
-        )
-        emb_median_move_in = self.effsam_embedding_masked(
-            rgb_capture, masks_move_in
-        )
-        # Calculate the cosine similarity between the embeddings
-        similarity_map = torch.nn.functional.cosine_similarity(
-            emb_median_move_out.unsqueeze(1),
-            emb_median_move_in.unsqueeze(0), dim=-1
-        )
-        # Nearest neighbor matching w/ Hungarian algorithm
-        num_move_out = similarity_map.size(0)
-        num_move_in = similarity_map.size(1)
-        # Add null hypotheses, cosine sim score set to 0.4
-        similarity_map = torch.cat((
-            similarity_map, 
-            threshold * torch.ones(num_move_out, num_move_out).to(device)
-        ), dim=-1)
-        similarity_map = similarity_map.cpu().numpy()
-        # print(f"sim_map:\n {similarity_map}")
-        row_ind, col_ind = linear_sum_assignment(1-similarity_map)
-        matches = torch.stack(
-            (torch.tensor(row_ind), torch.tensor(col_ind)), dim=-1
-        ).to(device)
-        # Unmatched move-in mask index to -1
-        matches[:, 1][matches[:, 1] >= num_move_in] = -1
-        # Unmatched move_out mask index to -1
-        present_indices = matches[:, 1][matches[:, 1] >= 0]
-        missing_indices = torch.tensor(
-            [i for i in range(num_move_in) if i not in present_indices]
-        ).to(device)
-        new_rows = torch.stack(
-            (-torch.ones_like(missing_indices), missing_indices), dim=-1
-        )
-        matches = torch.cat((matches, new_rows), dim=0)
-        return matches
-
+        pcd_feats = [
+            e for e, ct in zip(pcd_feats, pcd_counts) if ct > N * 0.25
+        ]
+        return pcds, pcd_feats
 
     def pretrain_iteration(self, rgbs, masks, cameras):
         """
@@ -493,91 +409,6 @@ class ChangeDet:
             print("Warning: RGB loss increased after pose change refinement")
         pose_refined = pose_init @ pose_update4x4.detach()
         return pose_refined
-
-    def localize_wrt_posed_RGBD(
-        self, rgb1, rgb2,  depth1, pose1, K1, K2, dist1, dist2,
-        mask1=None, mask2=None, verbose=False
-    ):
-        """
-        Localize a RGB image wrt a posed RGBD image
-        using feature matching and SolvePnP-RANSAC
-
-        Args:
-            rgb1: (1x3xHxW) RGB image 1
-            rgb2: (1x3xHxW) RGB image 2
-            depth1 (1x1xHxW) Depth image 1
-            pose1: (4x4 tensor) Camera pose wrt world for Image 1
-            K1: (3x3 tensor) Intrinsics for camera 1
-            K2: (3x3 tensor) Intrinsics for camera 2
-            dist1: (4 tensor) distortion params for camera 1
-            dist2: (4 tensor) distortion params for camera 2
-            mask1: (1x1xHxW) Mask for image 1 (optional)
-            mask2: (1x1xHxW) Mask for image 2 (optional)
-            verbose (bool): Whether to print absolute pose estimation summary
-
-        Returns:
-            pose (4x4 tensor): Camera pose wrt world for Image 2
-            num_inliers (float): Number of inliers
-            num_matches (float): Number of matches
-        """
-        assert len(depth1.shape) == len(rgb1.shape) == len(rgb2.shape) == 4
-        assert depth1.shape[1] == 1
-        assert rgb1.shape[1] == rgb2.shape[1] == 3
-        if mask1 is not None:
-            assert mask1.shape[1] == 1
-        if mask2 is not None:
-            assert mask2.shape[1] == 1
-        device = depth1.device
-        _, _, H, W = depth1.shape
-        # Image feature matching between rgb1 and rgb2
-        kp1, kp2, matches = image_matching(
-            rgb1, rgb2, mask1, mask2, flip=False
-        )
-        # Uncomment to debug
-        # debug_matches(rgb1, rgb2, kp1, kp2, matches, self.debug_dir)
-        kp1, kp2, matches = kp1[0], kp2[0], matches[0] 
-        if matches.shape[0] < 4:
-            print("Warn: Not enough matches!!")
-            return None, 0.0, 0
-        # NOTE: Don't undistort before reading depth
-        #       since both rgb and depth images are distorted
-        # Extract 3D positions of matched keypoints on image 1
-        depths_at_kps1 = extract_depths_at_pixels(kp1, depth1)
-        # Undistort keypoints on image 1
-        kp1_und = undistort_points(
-            kp1.unsqueeze(0), K1.unsqueeze(0), dist1.unsqueeze(0)
-        ).squeeze(0)
-        # Extract 3D positions of matched keypoints on image 1
-        points_at_kps1 = depths_to_points(
-            kp1_und, depths_at_kps1, pose1, K1
-        )
-        matched_pts3D = points_at_kps1[matches[:, 0]].cpu().numpy()
-        # Extract 2D positions of matched keypoints on image 2
-        # NOTE: No need to undistort since distort is considered in SolvePnP
-        matched_pts2D = kp2[matches[:, 1]].cpu().numpy()
-        # SolvePnP
-        pycolmap_cam = pycolmap.Camera(
-            model='OPENCV', width=W, height=H, params=[
-                K2[0, 0], K2[1, 1], K2[0, -1], K2[1, -1], *dist2
-            ]
-        )
-        ret = pycolmap.absolute_pose_estimation(
-            matched_pts2D, matched_pts3D, pycolmap_cam,
-            estimation_options={'ransac': {'max_error': 12.0}}, 
-            refinement_options={'print_summary': verbose}
-        )
-        if not ret['success']:
-            print("Warn: PnP failed!!")
-            return None, 0.0, 0
-        R_mat = torch.tensor(Quaternion(*ret['qvec']).rotation_matrix)
-        tvec = torch.tensor(ret['tvec'])
-        pose = torch.eye(4, device=device)
-        pose[:3, :3], pose[:3, 3] = R_mat, tvec
-        pose = pose.inverse()
-        if verbose:
-            print(f"Number of inliers: {ret['num_inliers']}/{len(matches)}")
-            print(f"pose change:\n {pose}")
-        return pose, ret["num_inliers"], len(matches)
 
     def main(
         self, transforms_json=None, configs=None,
@@ -725,118 +556,110 @@ class ChangeDet:
         #         for i in range(len(masks_changed_tensor))
         #     ]
         # )
-        # Consensus between the sparse views on the number of changed masks
-        num_masks_changed = statistics.mode(
-            [len(m) for m in masks_changed_sparse]
-        )
         masks_move_out_sparse_view, masks_move_in_sparse_view = [], []
         for ii, masks_changed in enumerate(masks_changed_sparse):
-            # Compare SAM prediction confidences to determine move-in or -out
-            masks_render, scores_render = sam_refine_masks(
-                rgbs_render_sparse_view[ii:ii+1],
-                masks_changed[:num_masks_changed],
+            masks_render, scores_render = effsam_refine_masks(
+                rgbs_render_sparse_view[ii:ii+1], masks_changed,
                 expand=configs["mask_refine_sparse_view"]
             )
-            masks_capture, scores_capture = sam_refine_masks(
-                rgbs_captured_sparse_view[ii:ii+1],
-                masks_changed[:num_masks_changed],
+            masks_capture, scores_capture = effsam_refine_masks(
+                rgbs_captured_sparse_view[ii:ii+1], masks_changed,
                 expand=configs["mask_refine_sparse_view"]
             )
-            discarded_masks = []
-            for jj in range(len(scores_render)):
-                if scores_render[jj] > scores_capture[jj]:
-                    masks_move_out_sparse_view.append(masks_render[jj])
-                    discarded_masks.append((1, jj, scores_capture[jj]))
-                    if scores_render[jj] < 0.95:
-                        print(f"WARN: Bad move-out mask at sparse view {ii}")
-                        print(f"score: {scores_render[jj]}")
-                else:
-                    masks_move_in_sparse_view.append(masks_capture[jj])
-                    discarded_masks.append((0, jj, scores_render[jj]))
-                    if scores_capture[jj] < 0.95:
-                        print(f"WARN: Bad move-in mask at sparse view {ii}")
-                        print(f"score: {scores_capture[jj]}")
-            # In case there are overlapping masks, we need to:
-            # Recycle discarded masks if we have less than needed masks
-            discarded_masks.sort(key=lambda x: x[2], reverse=True)
-            assert len(discarded_masks)+len(scores_render) >= num_masks_changed
-            for _ in range(num_masks_changed - len(scores_render)):
-                source, index, score = discarded_masks.pop(0)
-                if source == 0:
-                    masks_move_out_sparse_view.append(masks_render[index])
-                else:
-                    masks_move_in_sparse_view.append(masks_capture[index])
-                if score < 0.95:
-                    inout = ['in', 'out'][source]
-                    print(f"WARN: Bad move-{inout} mask at sparse view {ii}")
-                    print(f"score: {score}")
-        masks_move_out_sparse_view = torch.stack(
-            masks_move_out_sparse_view, dim=0
-        )
-        masks_move_in_sparse_view = torch.stack(
-            masks_move_in_sparse_view, dim=0
-        )
+            # Move-out masks have SAM prediction scores > 0.95 on rendered image
+            masks_out = torch.cat([
+                masks_render[i:i+1] 
+                for i, s in enumerate(scores_render) if s > 0.95
+            ], dim=0)
+            masks_move_out_sparse_view.append(masks_out)
+            # Move-in masks have SAM prediction scores > 0.95 on captured image
+            masks_in = torch.cat([
+                masks_capture[i:i+1] 
+                for i, s in enumerate(scores_capture) if s > 0.95
+            ], dim=0)
+            masks_move_in_sparse_view.append(masks_in)
+        # Ignore views with overlapped move-out regions
+        num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
+        no_overlap_ind = []
+        for i in range(len(masks_move_out_sparse_view)):
+            if masks_move_out_sparse_view[i].size(0) >= num_move_out:
+                no_overlap_ind.append(i)
         # # Uncomment to debug
         # save_masks(
-        #     masks_move_in_sparse_view, [
+        #     torch.cat(masks_move_in_sparse_view, dim=0), [
         #         f"{self.debug_dir}/masks_move_in{i}.png"
         #         for i in range(len(masks_move_in_sparse_view))
         #     ]
         # )
         # save_masks(
-        #     masks_move_out_sparse_view, [
+        #     torch.cat(masks_move_out_sparse_view, dim=0), [
         #         f"{self.debug_dir}/masks_move_out{i}.png"
         #         for i in range(len(masks_move_out_sparse_view))
         #     ]
         # )
-        # Estimate the object pose change from all the sparse views
-        # Choose the one with the most inlier
-        num_sparse_views = masks_move_out_sparse_view.size(0)
-        num_inliers, num_matches = 0, 0
-        pose_change = None
-        for idx in tqdm(range(num_sparse_views), desc="pose estimation"):
-            # Find the sparse view render with the largest number of matches
-            _, _, matches = image_matching(
-                rgbs_render_sparse_view,
-                rgbs_captured_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
-                masks_move_out_sparse_view,
-                masks_move_in_sparse_view[idx:idx+1].repeat(num_sparse_views, 1, 1, 1),
-                flip=False
-            )
-            matches_idx_ = [(len(mm), ii) for ii, mm in enumerate(matches)]
-            idx_max = max(matches_idx_)[1]
-            # Estimate the object pose change
-            pose_change_i, num_inlier_i, num_match_i = \
-            self.localize_wrt_posed_RGBD(
-                rgbs_render_sparse_view[idx_max:idx_max+1],
-                rgbs_captured_sparse_view[idx:idx+1],
-                depths_sparse_view[idx_max:idx_max+1],
-                cam_poses_sparse_view[idx_max],
-                Ks_sparse_view[idx_max], Ks_sparse_view[idx],
-                dist_params_sparse_view[idx_max], dist_params_sparse_view[idx],
-                masks_move_out_sparse_view[idx_max:idx_max+1],
-                masks_move_in_sparse_view[idx:idx+1],
-            )
-            if pose_change_i is None:
-                continue
-            # Equation in the paper
-            pose_change_i =  pose_change_i.inverse()
-            pose_change_i = cam_poses_sparse_view[idx] @ pose_change_i
-
-            if configs["pose_change_break"] is not None and \
-                idx == configs["pose_change_break"]:
-                num_inliers = num_inlier_i
-                num_matches = num_match_i
-                pose_change = pose_change_i
-                break
-            if num_inlier_i > num_inliers:
-                num_inliers = num_inlier_i
-                num_matches = num_match_i
-                pose_change = pose_change_i
-        assert pose_change is not None, "Object pose change estimation failed!"
-        print(f"pose_change: \n {pose_change.cpu().numpy()}")
-        print(f"inlier_ratio: {num_inliers} / {num_matches}")
-
+        # Multi-view move-out mask association 
+        pcds, pcd_feats = self.match_move_out(
+            rgbs_render_sparse_view[no_overlap_ind],
+            depths_sparse_view[no_overlap_ind], 
+            [masks_move_out_sparse_view[i] for i in no_overlap_ind],
+            cam_poses_sparse_view[no_overlap_ind],
+            Ks_sparse_view[no_overlap_ind]
+        )
+        # # Associate move-in masks with the object point clouds
+        # for i in range(len(rgbs_captured_sparse_view)):
+        #     res = self.match_pcd_move_in(
+        #         pcd_embs, rgbs_captured_sparse_view[i:i+1],
+        #         masks_move_in_sparse_view[i]
+        # )
+            # res = self.match_move_in_out(
+            #     rgbs_render_sparse_view[i:i+1], rgbs_captured_sparse_view[i:i+1],
+            #     masks_move_out_sparse_view[2*i:2*i+2], masks_move_in_sparse_view[2*i:2*i+2]
+            # )
+            # print(res)
+        feats = self.get_features_in_masks(
+            rgbs_captured_sparse_view, 
+            [m.any(dim=0, keepdim=True) for m in masks_changed_sparse]
+        )
+        pose_changes = []
+        num_sparse_views = len(masks_move_out_sparse_view)
+        for pcd_feat in pcd_feats:
+            num_inliers, num_matches = 0, 0
+            pose_change = None            
+            for idx in tqdm(range(num_sparse_views), desc="pose estimation"):
+                pose_change_i, num_inlier_i, num_match_i = pcd_feat.PnP(
+                    feats[idx][0], Ks_sparse_view[idx], H, W, self.matcher
+                )
+                m2d, m3d = pcd_feat.match(feats[idx][0], self.matcher)
+                m3d_proj, _ = project_points(
+                    m3d, cam_poses_sparse_view[0:1], Ks_sparse_view[0:1],
+                    dist_params_sparse_view[0:1], H, W
+                )
+                debug_matches(
+                    rgbs_render_sparse_view[0:1], 
+                    rgbs_captured_sparse_view[idx:idx+1],
+                    m3d_proj[:, :1, :], [m2d[:1, :]],
+                    torch.arange(1)[None, :, None].repeat(1, 1, 2),
+                    self.debug_dir
+                )
+                if pose_change_i is None:
+                    continue
+                # Equation in the paper
+                pose_change_i =  pose_change_i @ cam_poses_sparse_view[idx].inverse()
+                if configs["pose_change_break"] is not None and \
+                    idx == configs["pose_change_break"]:
+                    num_inliers = num_inlier_i
+                    num_matches = num_match_i
+                    pose_change = pose_change_i
+                    break
+                if num_inlier_i > num_inliers:
+                    num_inliers = num_inlier_i
+                    num_matches = num_match_i
+                    pose_change = pose_change_i
+                assert pose_change is not None, "Object pose change estimation failed!"
+                print(f"pose_change: \n {pose_change.cpu().numpy()}")
+                print(f"inlier_ratio: {num_inliers} / {num_matches}")
+            pose_changes.append(pose_change)
+       
         # Refine object pose change
         if refine_pose:
             new_cameras = params_to_cameras(
