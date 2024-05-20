@@ -34,7 +34,7 @@ from nerfstudio.utils.io import (
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
     compute_3D_bbox, compute_point_cloud, expand_3D_bbox,
-    point_cloud_filtering, nn_distance, pcd_size
+    point_cloud_filtering, nn_distance, pcd_size, bbox2voxel
 )
 from nerfstudio.utils.proj_utils import (
     depths_to_points, proj_check_3D_points, project_points
@@ -726,6 +726,29 @@ class ChangeDet:
         is_sparse_view[sparse_view_indices] = True
         masks_move_out[is_sparse_view] = masks_move_out_sparse_view
         masks_move_out[~is_sparse_view] = masks.to(device)
+        # Compute finer object 3D segmentation
+        # Initialize a 3D voxel grid
+        # TODO: Estimate the grid size from the 3D bbox size
+        grid_size = configs["voxel_dim"]
+        expanded_bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
+        voxels = bbox2voxel(point_cloud, configs["voxel_dim"], self.device)
+        high_score_masks = [
+            i for i, score in enumerate(scores) if score > 0.95
+        ]
+        occ_grid = proj_check_3D_points(
+            voxels, c2w[high_score_masks], K[high_score_masks],
+            dist_params[high_score_masks], masks_move_out[high_score_masks],
+            cutoff=0.99
+        )
+        obj3Dseg = Object3DSeg(
+            *expanded_bbox3d, occ_grid, pose_change, bbox3d,
+            configs["move_out_dilate"], 
+            configs["mask3d_dilate_uniform"],
+            configs["mask3d_dilate_top"]
+        )
+        # Uncomment to debug
+        # obj3Dseg.visualize(self.debug_dir)
+        obj3Dseg.save(self.output_dir)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
     parser.add_argument(

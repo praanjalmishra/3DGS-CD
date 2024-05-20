@@ -194,3 +194,23 @@ def expand_3D_bbox(bbox3d, percentage=.8):
     zmin_new = z_center - (z_half + z_expand)
     zmax_new = z_center + (z_half + z_expand)
     return (xmin_new, ymin_new, zmin_new), (xmax_new, ymax_new, zmax_new)
+
+
+def bbox2voxel(bbox3d, grid_size=400, device="cuda"):
+    """
+    Initialize a voxel grid for a 3D bounding box
+
+    Args:
+        bbox3d ((3-tuple, 3-tuple)): Point cloud
+        grid_size (int): Resolution of the voxel grid
+
+    Returns:
+        voxel (GxGxG): Voxel grid
+    """
+    assert len(bbox3d[0]) == len(bbox3d[1]) == 3
+    xs = torch.linspace(bbox3d[0][0], bbox3d[1][0], grid_size)
+    ys = torch.linspace(bbox3d[0][1], bbox3d[1][1], grid_size)
+    zs = torch.linspace(bbox3d[0][2], bbox3d[1][2], grid_size)
+    xs, ys, zs = torch.meshgrid(xs, ys, zs, indexing='ij')
+    voxel = torch.stack((xs, ys, zs), dim=-1).to(device)
+    return voxel
