@@ -24,6 +24,8 @@ from nerfstudio.utils.debug_utils import (
     debug_image_pairs, debug_images, debug_masks, debug_matches,
     debug_point_cloud
 )
+from nerfstudio.utils.effsam_utils import (
+    effsam_predict, effsam_embedding, effsam_refine_masks
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
@@ -33,9 +35,10 @@ from nerfstudio.utils.img_utils import (
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
 )
-from nerfstudio.utils.obj_3d_seg import Object3DSeg
+from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
-    compute_3D_bbox, compute_point_cloud, expand_3D_bbox, point_cloud_filtering
+    compute_3D_bbox, compute_point_cloud, expand_3D_bbox, point_cloud_filtering,
+    nn_distance, pcd_size
 )
 from nerfstudio.utils.proj_utils import (
     depths_to_points, proj_check_3D_points, project_points, undistort_points
@@ -149,8 +152,8 @@ class ChangeDet:
         # plt.close()
 
         # Get pixel-aligned image embeddings using sam_embedding
-        emb1 = sam_embedding(capture)
-        emb2 = sam_embedding(render)
+        emb1 = effsam_embedding(capture)
+        emb2 = effsam_embedding(render)
         # Calculate cosine similarity between embeddings
         norm1 = torch.nn.functional.normalize(emb1, p=2, dim=1)
         norm2 = torch.nn.functional.normalize(emb2, p=2, dim=1)
@@ -705,17 +708,17 @@ class ChangeDet:
             bbox2d, configs["pre_train_pred_bbox_expand"]
         )
         # SAM predict all masks
-        masks, scores = sam_predict(color_images_pretrain_view, bbox2d)
+        masks, scores = effsam_predict(color_images_pretrain_view, bbox2d)
         # Refine low-score masks
         for ii in tqdm(range(len(masks)), desc="SAM refine masks"):
             if scores[ii] < 0.95:
-                masks[ii:ii+1], scores[ii:ii+1] = sam_refine_masks(
+                masks[ii:ii+1], scores[ii:ii+1] = effsam_refine_masks(
                     color_images_pretrain_view[ii:ii+1], masks[ii:ii+1],
                     expand=configs["pre_train_refine_bbox_expand"]
                 )
         low_mask_scores = [x for x in scores if x < 0.95]
         if len(low_mask_scores) > 0:
-            print(f"WARN: Got {len(low_mask_scores)} low score masks")
+            print(f"Low score masks: {len(low_mask_scores)} / {len(masks)}")
             print(f"Lowest mask score: {min(low_mask_scores)}")
         else:
             print("All masks look great!!")
