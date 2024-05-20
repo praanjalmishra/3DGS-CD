@@ -3,17 +3,13 @@ import argparse
 import json
 import os
 import re
-import statistics
 from pathlib import Path
 
 import cv2
 import numpy as np
-import pycolmap
 import torch
 from lightglue import LightGlue, SuperPoint, viz2d
 from matplotlib import pyplot as plt
-from PIL import Image
-from pyquaternion import Quaternion
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
@@ -25,29 +21,28 @@ from nerfstudio.utils.debug_utils import (
     debug_point_cloud
 )
 from nerfstudio.utils.effsam_utils import (
-    effsam_predict, effsam_embedding, effsam_refine_masks
+    effsam_predict, effsam_embedding, effsam_refine_masks, compute_2D_bbox,
+    expand_2D_bbox
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
-    extract_depths_at_pixels, image_align, image_matching,
-    filter_features_with_mask
+    extract_depths_at_pixels, image_align, filter_features_with_mask
 )
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
 )
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
-    compute_3D_bbox, compute_point_cloud, expand_3D_bbox, point_cloud_filtering,
-    nn_distance, pcd_size
+    compute_3D_bbox, compute_point_cloud, expand_3D_bbox,
+    point_cloud_filtering, nn_distance, pcd_size
 )
 from nerfstudio.utils.proj_utils import (
-    depths_to_points, proj_check_3D_points, project_points, undistort_points
+    depths_to_points, proj_check_3D_points, project_points
 )
 from nerfstudio.utils.render_utils import render_cameras
-from nerfstudio.utils.sam_utils import (
-    compute_2D_bbox, expand_2D_bbox, sam_embedding, sam_predict,
-    sam_refine_masks
-)
+# from nerfstudio.utils.sam_utils import (
+#     sam_embedding, sam_predict, sam_refine_masks
+# )
 
 
 def camera_clone(cameras):

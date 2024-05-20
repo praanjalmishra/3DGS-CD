@@ -4,8 +4,9 @@ import torch
 from efficient_sam.build_efficient_sam import (
     build_efficient_sam_vits, build_efficient_sam_vitt
 )
-from nerfstudio.utils.debug_utils import debug_bbox_prompts
-from nerfstudio.utils.sam_utils import compute_2D_bbox, expand_2D_bbox
+from nerfstudio.utils.debug_utils import (
+    debug_bbox_prompts, debug_point_prompts
+)
 from tqdm import tqdm
 
 
@@ -22,13 +23,61 @@ effsam.eval()
 effsam.to(device)
 
 
-def effsam_predict(rgbs, bboxes):
+def compute_2D_bbox(points):
+    """
+    Compute bboxes for a batch of 2D points
+
+    Args:
+        points (NxMx2 Tensor): 2D points
+
+    Returns:
+        bboxes (Nx4 Tensor): 2D bboxes (xyxy)
+    """
+    assert len(points.shape) == 3
+    mins, _ = torch.min(points, dim=1)
+    maxs, _= torch.max(points, dim=1)
+    bboxes = torch.cat((mins, maxs), dim=1)
+    return bboxes
+
+
+def expand_2D_bbox(bboxes, percent=0.05):
+    """
+    Expand 2D bboxes by a certain percentage
+
+    Args:
+        bboxes (Nx4 tensor): 2D bboxes
+        H, W (int): Image height and width
+        percent (float): percentage to expand (xyxy)
+
+    Returns:
+        expanded_bboxes (Nx4 tensor): expanded bboxes (xyxy)
+    """
+    assert bboxes.shape[-1] == 4
+    bboxes = bboxes.float()
+    # Calculate width and height of each box
+    widths = bboxes[:, 2] - bboxes[:, 0]
+    heights = bboxes [:, 3] - bboxes[:, 1]
+    # Calculate the expansion for width and height
+    expand_width = widths * percent
+    expand_height = heights * percent
+    # Adjust the bbax coordinates 
+    expanded_bboxes = bboxes.clone()
+    expanded_bboxes[:, 0] -= expand_width / 2
+    expanded_bboxes[:, 1] -= expand_height / 2
+    expanded_bboxes[:, 2] += expand_width / 2
+    expanded_bboxes[:, 3] += expand_height / 2
+    expanded_bboxes [:, 3] += expand_height / 2
+    return expanded_bboxes
+
+
+def effsam_predict(rgbs, bboxes=None, points=None):
     """
     Query SAM model with bboxes prompts
 
     Args:
         rgbs: (N, 3, H, W) RGB images
         bboxes (N, 4): Bbox prompts (xyxy)
+        points (N, K, 2): Positive point prompts
 
     Returns:
         masks (N, 1, H, W): Image masks
@@ -40,17 +89,30 @@ def effsam_predict(rgbs, bboxes):
         pass
     else:
         raise ValueError("RGB images are of shape (N, 3, H, W)")
-    assert bboxes.shape[-1] == 4, \
+    assert bboxes is None or bboxes.shape[-1] == 4, \
         "bbox prompts are of shape (N, 4)"
-    assert bboxes.shape[0] == rgbs.shape[0], \
+    assert bboxes is None or bboxes.shape[0] == rgbs.shape[0], \
         "Image bbox batch mismatch"
-    # Uncomment to debug
-    # debug_bbox_prompts(rgbs, bboxes, "/home/ziqi/Desktop/test/")
-    bbox_pts = bboxes.reshape(bboxes.shape[0], 1, -1, 2)
-    # Make labels for bbox points: 2 for top-left, 3 for bottom-right
-    pts_label = torch.tensor([2, 3]).to(bbox_pts.device).reshape(1, 1, -1)
+    device = rgbs.device
+    pts, pts_labels = [], []
+    if bboxes is not None:
+        # Uncomment to debug
+        # debug_bbox_prompts(rgbs, bboxes, "/home/ziqi/Desktop/test/")
+        bbox_pts = bboxes.reshape(bboxes.shape[0], 1, -1, 2)
+        # Make labels for bbox points: 2 for top-left, 3 for bottom-right
+        labels = torch.tensor([2, 3]).to(bbox_pts.device).reshape(1, 1, -1)
+        pts.append(bbox_pts)
+        pts_labels.append(labels)
+    if points is not None:
+        assert points.shape[0] == rgbs.shape[0]
+        # Uncomment to debug
+        # debug_point_prompts(rgbs, points, "/home/ziqi/Desktop/test/")
+        pts.append(points[:, None, :, :])
+        pts_labels.append(torch.ones(1, 1, points.shape[1]).to(device))
+    pts = torch.cat(pts, dim=2)
+    pts_label = torch.cat(pts_labels, dim=2)
     masks, scores = [], []
-    for rgb, bbox_pt in tqdm(zip(rgbs, bbox_pts), desc="EffSAM"):
+    for rgb, bbox_pt in tqdm(zip(rgbs, pts), desc="EffSAM"):
         rgb = rgb.to(device)
         bbox_pt = bbox_pt.to(device)
         logits, iou = effsam(rgb[None, ...], bbox_pt[None, ...], pts_label)

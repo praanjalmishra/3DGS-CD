@@ -9,7 +9,7 @@ from lightglue import LightGlue, SuperPoint
 from lightglue.utils import rbd
 from nerfstudio.data.datamanagers.full_images_datamanager import _undistort_image
 from nerfstudio.utils.io import params_to_cameras
-from nerfstudio.utils.sam_utils import compute_2D_bbox
+from nerfstudio.utils.effsam_utils import compute_2D_bbox
 from PIL import Image, ImageOps
 from scipy.ndimage import binary_dilation, generate_binary_structure
 from torchvision.ops import RoIAlign, RoIPool
