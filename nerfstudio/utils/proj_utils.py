@@ -56,6 +56,8 @@ def distort_points(points, intrinsics, dist_coeffs):
     Returns:
         points_dist (NxMx2 Tensor): Distorted 2D points
     """
+    if torch.isclose(dist_coeffs, torch.zeros_like(dist_coeffs)).all():
+        return points
     # Apply distortion
     k1 = dist_coeffs[:, 0].unsqueeze(-1)
     k2 = dist_coeffs[:, 1].unsqueeze(-1)
@@ -147,7 +149,7 @@ def project_points(points, poses, intrinsics, dist_coeffs, H, W):
 
 def proj_check_3D_points(
     points, poses, intrinsics, dist_coeffs, masks,
-    cutoff=0.95, chunk_size=3e5
+    cutoff=0.95, chunk_size=1e6
 ):
     """
     Check if 3D points are inside object by projecting them to 2D masks
@@ -190,7 +192,7 @@ def proj_check_3D_points(
         x_coords = points2d[..., 0]
         y_coords = points2d[..., 1]
         # Create indices for batch dimension
-        batch_indices = torch.arange(masks.shape[0]).view(-1, 1).to(device)
+        batch_indices = torch.arange(masks.shape[0], device=device).view(-1, 1)
         # Use advanced indexing to get the mask values
         mask_values = masks[batch_indices, y_coords, x_coords]
         # Apply the valid mask

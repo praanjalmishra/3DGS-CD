@@ -1,6 +1,9 @@
 # Point cloud processing functions for for NeRFacto2
 import cv2
+import numpy as np
+import open3d as o3d
 import torch
+
 from scipy.spatial import ConvexHull
 from scipy.spatial.distance import cdist
 
@@ -113,6 +116,31 @@ def pcd_size(pcd):
     hullpoints = pcd.cpu().numpy()[hull.vertices, :]
     hdist = cdist(hullpoints, hullpoints, metric='euclidean')
     return hdist.max()
+
+
+def FPS(pcd, num=100):
+    """
+    Farthest point sampling for a point cloud
+
+    Args:
+        pcd (Nx3): Point cloud
+        num (int): Number of points to sample
+
+    Returns:
+        indices (M): Indices of the sampled points
+        pcd_fps (Mx3): Sampled points
+    """
+    assert pcd.shape[-1] == 3
+    if pcd.shape[0] < num:
+        return torch.arange(pcd.shape[0]).to(pcd.device), pcd
+    device, dtype = pcd.device, pcd.dtype
+    pcd = pcd.cpu().numpy()
+    pcd_o3d = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcd))
+    pcd_fps = np.asarray(pcd_o3d.farthest_point_down_sample(num).points)
+    indices = np.nonzero((pcd[:, None, :] == pcd_fps[None, :, :]).all(-1))[0]
+    pcd_fps = torch.from_numpy(pcd_fps).to(device).to(dtype)
+    indices = torch.tensor(indices).to(device)
+    return indices, pcd_fps
 
 
 def transform_point_cloud(point_cloud, transform_matrix): 

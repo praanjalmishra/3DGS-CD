@@ -128,6 +128,39 @@ def effsam_predict(rgbs, bboxes=None, points=None):
     return masks, scores
 
 
+def effsam_batch_predict(rgb, bboxes):
+    """
+    Multi-bbox batch predict with EfficientSAM
+
+    Args:
+        rgb (1, 3, H, W): RGB images
+        bboxes (N, 4): Bbox prompts (xyxy)
+    
+    Returns:
+        masks (N, 1, H, W): Image masks
+        scores (N-list): Confidence scores
+    """
+    assert rgb.shape[:2] == (1, 3)
+    assert len(bboxes.shape) == 2 and bboxes.shape[-1] == 4
+    # # Uncomment to debug
+    # debug_bbox_prompts(
+    #     rgb.repeat(bboxes.shape[0], 1, 1, 1), bboxes,
+    #     "/home/ziqi/Desktop/test/"
+    # )
+    bbox_pts = bboxes.reshape(1, bboxes.shape[0], 2, 2)
+    # Make labels for bbox points: 2 for top-left, 3 for bottom-right
+    labels = torch.tensor([2, 3]).to(bbox_pts.device)
+    labels = labels[None, None].repeat(1, bboxes.shape[0], 1)
+    logits, iou = effsam(rgb, bbox_pts, labels)
+    sorted_ids = torch.argsort(iou, dim=-1, descending=True)
+    iou = torch.take_along_dim(iou, sorted_ids, dim=2)
+    logits = torch.take_along_dim(logits, sorted_ids[..., None, None], dim=2)
+    masks = torch.ge(logits[0, :, 0, :, :], 0)
+    masks = masks.unsqueeze(1)
+    scores = iou[0, :, 0].tolist()
+    return masks, scores
+
+
 def effsam_embedding(rgb, upsample=True):
     """
     Get pixel-aligned image embeddings
