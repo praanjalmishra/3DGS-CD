@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from lightglue import LightGlue, SuperPoint, viz2d
 from matplotlib import pyplot as plt
+from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
 
@@ -18,11 +19,11 @@ from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.utils.debug_utils import (
     debug_image_pairs, debug_images, debug_masks, debug_matches,
-    debug_point_cloud
+    debug_point_cloud, debug_point_prompts
 )
 from nerfstudio.utils.effsam_utils import (
-    effsam_predict, effsam_embedding, effsam_refine_masks, compute_2D_bbox,
-    expand_2D_bbox
+    effsam_predict, effsam_embedding, effsam_refine_masks,
+    effsam_batch_predict, compute_2D_bbox, expand_2D_bbox
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
@@ -537,8 +538,6 @@ class ChangeDet:
         # )
 
         # Change detection on sparse views
-        # TODO: Align the rendered and captured images
-        # TODO: Handle multi-obj cases (1) obj association (2) multi-mask
         masks_changed_sparse = []
         for ii in range(len(sparse_view_file_ids)): 
             masks_changed = self.image_diff(
@@ -554,14 +553,10 @@ class ChangeDet:
         #         for i in range(len(masks_changed_tensor))
         #     ]
         # )
-        masks_move_out_sparse_view, masks_move_in_sparse_view = [], []
+        masks_move_out_sparse_view = []
         for ii, masks_changed in enumerate(masks_changed_sparse):
             masks_render, scores_render = effsam_refine_masks(
                 rgbs_render_sparse_view[ii:ii+1], masks_changed,
-                expand=configs["mask_refine_sparse_view"]
-            )
-            masks_capture, scores_capture = effsam_refine_masks(
-                rgbs_captured_sparse_view[ii:ii+1], masks_changed,
                 expand=configs["mask_refine_sparse_view"]
             )
             # Move-out masks have SAM prediction scores > 0.95 on rendered image
@@ -570,12 +565,6 @@ class ChangeDet:
                 for i, s in enumerate(scores_render) if s > 0.95
             ], dim=0)
             masks_move_out_sparse_view.append(masks_out)
-            # Move-in masks have SAM prediction scores > 0.95 on captured image
-            masks_in = torch.cat([
-                masks_capture[i:i+1] 
-                for i, s in enumerate(scores_capture) if s > 0.95
-            ], dim=0)
-            masks_move_in_sparse_view.append(masks_in)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
         no_overlap_ind = []
@@ -583,18 +572,16 @@ class ChangeDet:
             if masks_move_out_sparse_view[i].size(0) >= num_move_out:
                 no_overlap_ind.append(i)
         # # Uncomment to debug
-        # save_masks(
-        #     torch.cat(masks_move_in_sparse_view, dim=0), [
-        #         f"{self.debug_dir}/masks_move_in{i}.png"
-        #         for i in range(len(masks_move_in_sparse_view))
-        #     ]
-        # )
-        # save_masks(
-        #     torch.cat(masks_move_out_sparse_view, dim=0), [
-        #         f"{self.debug_dir}/masks_move_out{i}.png"
-        #         for i in range(len(masks_move_out_sparse_view))
-        #     ]
-        # )
+        # masks_to_save = torch.cat(masks_move_in_sparse_view, dim=0)
+        # save_masks(masks_to_save, [
+        #     f"{self.debug_dir}/masks_move_in{i}.png" 
+        #     for i in range(len(masks_to_save))
+        # ])
+        # masks_to_save = torch.cat(masks_move_out_sparse_view, dim=0)
+        # save_masks(masks_to_save, [
+        #     f"{self.debug_dir}/masks_move_out{i}.png"
+        #     for i in range(len(masks_to_save))
+        # ])
         # Multi-view move-out mask association 
         pcds, pcd_feats = self.match_move_out(
             rgbs_render_sparse_view[no_overlap_ind],
@@ -603,17 +590,7 @@ class ChangeDet:
             cam_poses_sparse_view[no_overlap_ind],
             Ks_sparse_view[no_overlap_ind]
         )
-        # # Associate move-in masks with the object point clouds
-        # for i in range(len(rgbs_captured_sparse_view)):
-        #     res = self.match_pcd_move_in(
-        #         pcd_embs, rgbs_captured_sparse_view[i:i+1],
-        #         masks_move_in_sparse_view[i]
-        # )
-            # res = self.match_move_in_out(
-            #     rgbs_render_sparse_view[i:i+1], rgbs_captured_sparse_view[i:i+1],
-            #     masks_move_out_sparse_view[2*i:2*i+2], masks_move_in_sparse_view[2*i:2*i+2]
-            # )
-            # print(res)
+        # Object pose change estimate
         feats = self.get_features_in_masks(
             rgbs_captured_sparse_view, 
             [m.any(dim=0, keepdim=True) for m in masks_changed_sparse]
@@ -643,7 +620,7 @@ class ChangeDet:
                 if pose_change_i is None:
                     continue
                 # Equation in the paper
-                pose_change_i =  pose_change_i @ cam_poses_sparse_view[idx].inverse()
+                pose_change_i =  cam_poses_sparse_view[idx] @ pose_change_i.inverse()
                 if configs["pose_change_break"] is not None and \
                     idx == configs["pose_change_break"]:
                     num_inliers = num_inlier_i
@@ -667,15 +644,49 @@ class ChangeDet:
                 cam_poses_sparse_view, Ks_sparse_view, 
                 dist_params_sparse_view, H, W
             )
-            pose_change = self.refine_obj_pose_change(
-                pose_change, rgbs_captured_sparse_view, 
-                masks_move_in_sparse_view, new_cameras,
-                lr=configs["pose_refine_lr"],
-                epochs=configs["pose_refine_epochs"],
-                patience=configs["pose_refine_patience"]
-            )
-            print(f"refined pose_change: \n {pose_change.cpu().numpy()}")
-
+            bboxes2d = []
+            for ii, (pcd, ps_chg) in enumerate(zip(pcds, pose_changes)):
+                pcd_recfg = (ps_chg[:3, :3] @ pcds[ii].T + ps_chg[:3, 3:4]).T
+                pcd_proj, is_point_in_img = project_points(
+                    pcd_recfg, cam_poses_sparse_view, Ks_sparse_view,
+                    dist_params_sparse_view, H, W
+                )
+                if not is_point_in_img.all():
+                    print("WARN: Some points are out of the pretraining images")
+                # debug_point_prompts(
+                #     rgbs_captured_sparse_view, pcd_proj, self.debug_dir
+                # )
+                bbox2d = compute_2D_bbox(pcd_proj)
+                # Slightly expand 2D bboxes to improve SAM predictions
+                bbox2d = expand_2D_bbox(
+                    bbox2d, configs["pre_train_pred_bbox_expand"]
+                )
+                bboxes2d.append(bbox2d)
+            bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
+            # SAM predict all masks (batched for multi-object)
+            masks_move_in_sparse_view, scores = [], []
+            for img, bbox2d in tqdm(
+                zip(rgbs_captured_sparse_view, bboxes2d), desc="SAM predict"
+            ):
+                mask, score = effsam_batch_predict(img[None], bbox2d)
+                masks_move_in_sparse_view.append(mask)
+                scores.append(score)
+            masks_move_in = torch.stack(masks_move_in, dim=1) # MxNx1xHxW
+            scores = [list(t) for t in zip(*scores)] # M-list of N-list
+            for ii, pose_change in enumerate(pose_changes):
+                obj_masks_move_in_sparse_view = masks_move_in_sparse_view[ii]
+                high_score = [i for i, s in enumerate(scores[ii]) if s > 0.95]
+                assert len(high_score) > 0, "No good move-in masks"
+                high_score = torch.from_numpy(np.array(high_score).astype(int))
+                pose_changes[ii] = self.refine_obj_pose_change(
+                    pose_change, rgbs_captured_sparse_view[high_score],
+                    obj_masks_move_in_sparse_view[high_score],
+                    new_cameras[high_score],
+                    lr=configs["pose_refine_lr"],
+                    epochs=configs["pose_refine_epochs"],
+                    patience=configs["pose_refine_patience"]
+                )
+                print(f"refined pose_change: \n {pose_changes[ii].cpu().numpy()}")
 
         # Project the object point cloud to dense old views to get 2D bboxes
         bboxes2d = []
