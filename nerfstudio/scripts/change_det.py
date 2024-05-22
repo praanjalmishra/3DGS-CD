@@ -627,18 +627,19 @@ class ChangeDet:
                 pose_change_i, num_inlier_i, num_match_i = pcd_feat.PnP(
                     feats[idx][0], Ks_sparse_view[idx], H, W, self.matcher
                 )
-                m2d, m3d = pcd_feat.match(feats[idx][0], self.matcher)
-                m3d_proj, _ = project_points(
-                    m3d, cam_poses_sparse_view[0:1], Ks_sparse_view[0:1],
-                    dist_params_sparse_view[0:1], H, W
-                )
-                debug_matches(
-                    rgbs_render_sparse_view[0:1], 
-                    rgbs_captured_sparse_view[idx:idx+1],
-                    m3d_proj[:, :1, :], [m2d[:1, :]],
-                    torch.arange(1)[None, :, None].repeat(1, 1, 2),
-                    self.debug_dir
-                )
+                # # Uncomment to debug
+                # m2d, m3d = pcd_feat.match(feats[idx][0], self.matcher)
+                # m3d_proj, _ = project_points(
+                #     m3d, cam_poses_sparse_view[0:1], Ks_sparse_view[0:1],
+                #     dist_params_sparse_view[0:1], H, W
+                # )
+                # debug_matches(
+                #     rgbs_render_sparse_view[0:1], 
+                #     rgbs_captured_sparse_view[idx:idx+1],
+                #     m3d_proj[:, :1, :], [m2d[:1, :]],
+                #     torch.arange(1)[None, :, None].repeat(1, 1, 2),
+                #     self.debug_dir
+                # )
                 if pose_change_i is None:
                     continue
                 # Equation in the paper
@@ -653,11 +654,13 @@ class ChangeDet:
                     num_inliers = num_inlier_i
                     num_matches = num_match_i
                     pose_change = pose_change_i
-                assert pose_change is not None, "Object pose change estimation failed!"
-                print(f"pose_change: \n {pose_change.cpu().numpy()}")
-                print(f"inlier_ratio: {num_inliers} / {num_matches}")
             pose_changes.append(pose_change)
-       
+            assert pose_change is not None, "Object pose change estimation failed!"
+            print(f"pose_change: \n {pose_change.cpu().numpy()}")
+            print(f"inlier_ratio: {num_inliers} / {num_matches}")
+        # # Uncomment to debug
+        # debug_point_cloud(pcds[0], self.debug_dir)
+
         # Refine object pose change
         if refine_pose:
             new_cameras = params_to_cameras(
@@ -674,58 +677,51 @@ class ChangeDet:
             print(f"refined pose_change: \n {pose_change.cpu().numpy()}")
 
 
-        # Convert sparse view depth images to point cloud wrt world 
-        point_cloud = compute_point_cloud(
-            depths_sparse_view, cam_poses_sparse_view, Ks_sparse_view,
-            masks_move_out_sparse_view
-        )
-        point_cloud = point_cloud_filtering(
-            point_cloud, configs["pcd_filtering"]
-        )
-        # debug_point_cloud(point_cloud, self.debug_dir)
-        bbox3d = compute_3D_bbox(point_cloud)
-        print(f"bbox3d: {bbox3d}")
+        # Project the object point cloud to dense old views to get 2D bboxes
+        bboxes2d = []
+        for pcd in pcds:
+            pcd_proj, is_point_in_img = project_points(
+                pcd, cam_poses_pretrain_view, Ks_pretrain_view,
+                dist_params_pretrain_view, H, W
+            )
+            if not is_point_in_img.all():
+                print("WARN: Some points are out of the pretraining images")
+            # debug_point_prompts(
+            #     color_images_pretrain_view, pcd_proj, self.debug_dir
+            # )
+            bbox2d = compute_2D_bbox(pcd_proj)
+            # Slightly expand 2D bboxes to improve SAM predictions
+            bbox2d = expand_2D_bbox(
+                bbox2d, configs["pre_train_pred_bbox_expand"]
+            )
+            bboxes2d.append(bbox2d)
+        bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
 
-        # Query SAM to obtain pre-training view 2D masks
-        # Project the object point cloud to dense ald views
-        point_cloud_proj, is_point_in_img = project_points(
-            point_cloud, cam_poses_pretrain_view, Ks_pretrain_view,
-            dist_params_pretrain_view, H, W
-        )
-        if not is_point_in_img.all():
-            print("WARN: Some points are out of the pretraining images")
-        # debug_point_prompts(
-        #   color_images_pretrain_view, point_cloud_proj, self.debug_dir
-        # )
-        bbox2d = compute_2D_bbox(point_cloud_proj)
-        # Slightly expand 2D bboxes to improve SAM predictions
-        bbox2d = expand_2D_bbox(
-            bbox2d, configs["pre_train_pred_bbox_expand"]
-        )
-        # SAM predict all masks
-        masks, scores = effsam_predict(color_images_pretrain_view, bbox2d)
-        # Refine low-score masks
-        for ii in tqdm(range(len(masks)), desc="SAM refine masks"):
-            if scores[ii] < 0.95:
-                masks[ii:ii+1], scores[ii:ii+1] = effsam_refine_masks(
-                    color_images_pretrain_view[ii:ii+1], masks[ii:ii+1],
-                    expand=configs["pre_train_refine_bbox_expand"]
-                )
-        low_mask_scores = [x for x in scores if x < 0.95]
-        if len(low_mask_scores) > 0:
-            print(f"Low score masks: {len(low_mask_scores)} / {len(masks)}")
-            print(f"Lowest mask score: {min(low_mask_scores)}")
-        else:
-            print("All masks look great!!")
+        # SAM predict all masks (batched for multi-object)
+        masks, scores = [], []
+        for img, bbox2d in tqdm(
+            zip(color_images_pretrain_view, bboxes2d), desc="SAM predict"
+        ):
+            mask, score = effsam_batch_predict(
+                img[None].to(self.device), bbox2d
+            )
+            masks.append(mask)
+            scores.append(score)
+        masks = torch.stack(masks, dim=1) # MxNx1xHxW
+        scores = [list(t) for t in zip(*scores)] # M-list of N-list
+        # # Uncomment to debug
+        # debug_masks(masks[0, ...], self.debug_dir)
 
-        # Concat move-out masks on new sparse and old dense views
-        masks_move_out = torch.empty(
-            (N, *masks.shape[1:]), dtype=torch.bool
-        ).to(device)
-        is_sparse_view = torch.zeros(N, dtype=torch.bool).to(device)
-        is_sparse_view[sparse_view_indices] = True
-        masks_move_out[is_sparse_view] = masks_move_out_sparse_view
-        masks_move_out[~is_sparse_view] = masks.to(device)
+        # Get high score mask indices
+        high_score_inds = []
+        for ss in scores:
+            high_score = [i for i, x in enumerate(ss) if x > 0.95]
+            if len(high_score) > 0:
+                print(f"High score masks: {len(high_score)}/{masks.shape[1]}")
+            else:
+                print("All masks look great!!")
+            high_score_inds.append(high_score)
+
         # Compute finer object 3D segmentation
         # Initialize a 3D voxel grid
         # TODO: Estimate the grid size from the 3D bbox size
