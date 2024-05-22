@@ -644,6 +644,7 @@ class ChangeDet:
                 cam_poses_sparse_view, Ks_sparse_view, 
                 dist_params_sparse_view, H, W
             )
+            # Move obj pcds and project to sparse views to obtain 2D bboxes
             bboxes2d = []
             for ii, (pcd, ps_chg) in enumerate(zip(pcds, pose_changes)):
                 pcd_recfg = (ps_chg[:3, :3] @ pcds[ii].T + ps_chg[:3, 3:4]).T
@@ -663,7 +664,7 @@ class ChangeDet:
                 )
                 bboxes2d.append(bbox2d)
             bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
-            # SAM predict all masks (batched for multi-object)
+            # SAM predict masks on sparse-view captured images
             masks_move_in_sparse_view, scores = [], []
             for img, bbox2d in tqdm(
                 zip(rgbs_captured_sparse_view, bboxes2d), desc="SAM predict"
@@ -671,7 +672,9 @@ class ChangeDet:
                 mask, score = effsam_batch_predict(img[None], bbox2d)
                 masks_move_in_sparse_view.append(mask)
                 scores.append(score)
-            masks_move_in = torch.stack(masks_move_in, dim=1) # MxNx1xHxW
+            masks_move_in_sparse_view = torch.stack(
+                masks_move_in_sparse_view, dim=1
+            ) # MxNx1xHxW
             scores = [list(t) for t in zip(*scores)] # M-list of N-list
             for ii, pose_change in enumerate(pose_changes):
                 obj_masks_move_in_sparse_view = masks_move_in_sparse_view[ii]
@@ -686,7 +689,9 @@ class ChangeDet:
                     epochs=configs["pose_refine_epochs"],
                     patience=configs["pose_refine_patience"]
                 )
-                print(f"refined pose_change: \n {pose_changes[ii].cpu().numpy()}")
+                print(
+                    f"refined pose_change: \n {pose_changes[ii].cpu().numpy()}"
+                )
 
         # Project the object point cloud to dense old views to get 2D bboxes
         bboxes2d = []
@@ -735,26 +740,26 @@ class ChangeDet:
 
         # Compute finer object 3D segmentation
         # Initialize a 3D voxel grid
-        # TODO: Estimate the grid size from the 3D bbox size
-        grid_size = configs["voxel_dim"]
-        expanded_bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
-        voxels = bbox2voxel(point_cloud, configs["voxel_dim"], self.device)
-        high_score_masks = [
-            i for i, score in enumerate(scores) if score > 0.95
-        ]
-        occ_grid = proj_check_3D_points(
-            voxels, c2w[high_score_masks], K[high_score_masks],
-            dist_params[high_score_masks], masks_move_out[high_score_masks],
-            cutoff=0.99
-        )
-        obj3Dseg = Object3DSeg(
-            *expanded_bbox3d, occ_grid, pose_change, bbox3d,
-            configs["move_out_dilate"], 
-            configs["mask3d_dilate_uniform"],
-            configs["mask3d_dilate_top"]
-        )
-        # Uncomment to debug
-        # obj3Dseg.visualize(self.debug_dir)
+        for ii, pcd in enumerate(pcds):
+            bbox3d = compute_3D_bbox(pcd)
+            print(f"bbox3d: {bbox3d}")
+            expanded_bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
+            voxel = bbox2voxel(bbox3d, configs["voxel_dim"], self.device)
+            occ_grid = proj_check_3D_points(
+                voxel, cam_poses_pretrain_view[high_score_inds[ii]], 
+                Ks_pretrain_view[high_score_inds[ii]],
+                dist_params_pretrain_view[high_score_inds[ii]],
+                masks[ii][high_score_inds[ii]],
+                cutoff=0.95
+            )
+            obj3Dseg = Object3DSeg(
+                *expanded_bbox3d, occ_grid, pose_change, bbox3d,
+                configs["move_out_dilate"], 
+                configs["mask3d_dilate_uniform"],
+                configs["mask3d_dilate_top"]
+            )
+            # # Uncomment to debug
+            # obj3Dseg.visualize(self.debug_dir)
         obj3Dseg.save(self.output_dir)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
