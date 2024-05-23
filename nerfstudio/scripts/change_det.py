@@ -743,11 +743,15 @@ class ChangeDet:
             pcds, masks_move_out_pretrain_view, cam_poses_pretrain_view,
             Ks_pretrain_view, dist_params_pretrain_view, H, W
         )
+        for vv in visible:
+            print(f"Visible views: {len(vv)} / {len(cam_poses_pretrain_view)}")
         # Views having high-score masks and from which object is fully visible
         high_score_inds = [
             list(set(hs) & set(vis))
             for hs, vis in zip(high_score_inds, visible)
         ]
+        for inds in high_score_inds:
+            print(f"#Views for 3D seg: {len(inds)} / {len(Ks_pretrain_view)}")
 
         # Compute finer object 3D segmentation
         # Initialize a 3D voxel grid
@@ -760,7 +764,7 @@ class ChangeDet:
                 voxel, cam_poses_pretrain_view[high_score_inds[ii]], 
                 Ks_pretrain_view[high_score_inds[ii]],
                 dist_params_pretrain_view[high_score_inds[ii]],
-                masks[ii][high_score_inds[ii]],
+                masks_move_out_pretrain_view[ii][high_score_inds[ii]],
                 cutoff=0.99
             )
             obj3Dseg = Object3DSeg(
