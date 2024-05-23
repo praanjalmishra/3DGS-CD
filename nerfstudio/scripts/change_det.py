@@ -27,7 +27,8 @@ from nerfstudio.utils.effsam_utils import (
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.img_utils import (
-    extract_depths_at_pixels, image_align, filter_features_with_mask
+    extract_depths_at_pixels, image_align, filter_features_with_mask,
+    in_image
 )
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
@@ -348,6 +349,7 @@ class ChangeDet:
     ):
         """
         Refine object pose change to make the object pose pixel-perfect
+        TODO: Use pose change to move Gaussians instead of cameras for batch
 
         Args:
             pose_init (4x4): Object pose change initial value
@@ -433,17 +435,19 @@ class ChangeDet:
         assert masks.shape[1] == len(poses)
         vis = []
         for ii in range(len(pcds)):
-            pcd_proj, pcd_in_img = project_points(
+            pcd_proj, _ = project_points(
                 pcds[ii], poses, Ks, dist_params, H, W
             )
-            in_img = pcd_in_img.all(dim=-1)
             # We count how many object points can project in masks
             vis_ii = []
-            for jj, (proj, proj_in) in enumerate(zip(pcd_proj, pcd_in_img)):
-                proj = proj[proj_in].round().long().unique(dim=0)
+            for jj, proj in enumerate(pcd_proj):
+                proj = proj.round().long().unique(dim=0)
+                proj_in = in_image(proj, H, W)
+                proj_in_ratio = proj_in.sum().item() / proj.size(0)
+                proj = proj[proj_in]
                 in_mask_count = masks[ii, jj, 0][proj[:, 1], proj[:, 0]].sum()
                 in_mask_ratio = in_mask_count / proj.size(0)
-                if in_mask_ratio > threshold and in_img[jj]:
+                if in_mask_ratio > threshold and proj_in_ratio > threshold:
                     vis_ii.append(jj)
             vis.append(vis_ii)
         return vis
@@ -598,11 +602,13 @@ class ChangeDet:
                 rgbs_render_sparse_view[ii:ii+1], masks_changed,
                 expand=configs["mask_refine_sparse_view"]
             )
-            # Move-out masks have SAM prediction scores > 0.95 on rendered image
-            masks_out = torch.cat([
+            # Move-out masks have SAM prediction score > 0.95 on rendered image
+            masks_out = [
                 masks_render[i:i+1]
                 for i, s in enumerate(scores_render) if s > 0.95
-            ], dim=0)
+            ]
+            masks_out = torch.cat(masks_out, dim=0) if len(masks_out) > 0\
+                else torch.empty(0, 1, H, W, device=device) 
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
