@@ -158,6 +158,8 @@ class ChangeDet:
         )
         similarity_map = similarity_map.squeeze().cpu().numpy()
         similarity_map = (similarity_map * 255).astype(np.uint8)
+        # Uncomment to debug
+        # cv2.imwrite(f"{self.debug_dir}/similarity_map.png", similarity_map)
         # Threshold the SAM cosine similarity map
         thresh = cv2.threshold(
             similarity_map, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
@@ -409,6 +411,43 @@ class ChangeDet:
         pose_refined = pose_init @ pose_update4x4.detach()
         return pose_refined
 
+    def check_visibility(
+        self, pcds, masks, poses, Ks, dist_params, H, W, threshold=0.95
+    ):
+        """
+        Check visibility of object point clouds
+
+        Args:
+            pcds (M-list of Lx3): Object point clouds
+            masks (MxNx1xHxW): Object move-out masks on the sparse views
+            poses (Nx4x4): Camera poses wrt world
+            Ks (Nx3x3): Camera intrinsics
+            dist_params (Nx4): Camera distortion parameters
+            H (int): Image height
+            W (int): Image width
+            
+        Returns:
+            vis (M-list of N-list of int): Views where obj pcd is fully visible
+        """
+        assert len(pcds) == len(masks)
+        assert masks.shape[1] == len(poses)
+        vis = []
+        for ii in range(len(pcds)):
+            pcd_proj, pcd_in_img = project_points(
+                pcds[ii], poses, Ks, dist_params, H, W
+            )
+            in_img = pcd_in_img.all(dim=-1)
+            # We count how many object points can project in masks
+            vis_ii = []
+            for jj, (proj, proj_in) in enumerate(zip(pcd_proj, pcd_in_img)):
+                proj = proj[proj_in].round().long().unique(dim=0)
+                in_mask_count = masks[ii, jj, 0][proj[:, 1], proj[:, 0]].sum()
+                in_mask_ratio = in_mask_count / proj.size(0)
+                if in_mask_ratio > threshold and in_img[jj]:
+                    vis_ii.append(jj)
+            vis.append(vis_ii)
+        return vis
+
     def main(
         self, transforms_json=None, configs=None,
         refine_pose=True, cam_path=None
@@ -561,7 +600,7 @@ class ChangeDet:
             )
             # Move-out masks have SAM prediction scores > 0.95 on rendered image
             masks_out = torch.cat([
-                masks_render[i:i+1] 
+                masks_render[i:i+1]
                 for i, s in enumerate(scores_render) if s > 0.95
             ], dim=0)
             masks_move_out_sparse_view.append(masks_out)
@@ -765,7 +804,7 @@ class ChangeDet:
                 Ks_pretrain_view[high_score_inds[ii]],
                 dist_params_pretrain_view[high_score_inds[ii]],
                 masks_move_out_pretrain_view[ii][high_score_inds[ii]],
-                cutoff=0.99
+                cutoff=0.95
             )
             obj3Dseg = Object3DSeg(
                 *expanded_bbox3d, occ_grid, pose_change, bbox3d,
