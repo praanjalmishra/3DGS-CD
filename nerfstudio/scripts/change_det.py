@@ -534,7 +534,7 @@ class ChangeDet:
         )
         # # Uncomment to debug
         # debug_image_pairs(
-        #   rgbs_render_sparse_view, rgbs_captured_sparse_view, self.debug_dir
+        #     rgbs_render_sparse_view, rgbs_captured_sparse_view, self.debug_dir
         # )
 
         # Change detection on sparse views
@@ -658,13 +658,12 @@ class ChangeDet:
                 #     rgbs_captured_sparse_view, pcd_proj, self.debug_dir
                 # )
                 bbox2d = compute_2D_bbox(pcd_proj)
-                # Slightly expand 2D bboxes to improve SAM predictions
                 bbox2d = expand_2D_bbox(
                     bbox2d, configs["pre_train_pred_bbox_expand"]
                 )
                 bboxes2d.append(bbox2d)
             bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
-            # SAM predict masks on sparse-view captured images
+            # SAM predict move-in masks on sparse-view captured images
             masks_move_in_sparse_view, scores = [], []
             for img, bbox2d in tqdm(
                 zip(rgbs_captured_sparse_view, bboxes2d), desc="SAM predict"
@@ -713,30 +712,42 @@ class ChangeDet:
             bboxes2d.append(bbox2d)
         bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
 
-        # SAM predict all masks (batched for multi-object)
-        masks, scores = [], []
+        # SAM predict all move-out masks (batched for multi-object)
+        masks_move_out_pretrain_view, scores = [], []
         for img, bbox2d in tqdm(
             zip(color_images_pretrain_view, bboxes2d), desc="SAM predict"
         ):
             mask, score = effsam_batch_predict(
                 img[None].to(self.device), bbox2d
             )
-            masks.append(mask)
+            masks_move_out_pretrain_view.append(mask)
             scores.append(score)
-        masks = torch.stack(masks, dim=1) # MxNx1xHxW
+        masks_move_out_pretrain_view = torch.stack(
+            masks_move_out_pretrain_view, dim=1
+        ) # MxNx1xHxW
         scores = [list(t) for t in zip(*scores)] # M-list of N-list
         # # Uncomment to debug
-        # debug_masks(masks[0, ...], self.debug_dir)
+        # debug_masks(masks_move_out_pretrain_view[0, ...], self.debug_dir)
 
         # Get high score mask indices
         high_score_inds = []
         for ss in scores:
             high_score = [i for i, x in enumerate(ss) if x > 0.95]
             if len(high_score) > 0:
-                print(f"High score masks: {len(high_score)}/{masks.shape[1]}")
+                print(f"High score masks: {len(high_score)} / {len(ss)}")
             else:
                 print("All masks look great!!")
             high_score_inds.append(high_score)
+        # Check visibility of object point clouds
+        visible = self.check_visibility(
+            pcds, masks_move_out_pretrain_view, cam_poses_pretrain_view,
+            Ks_pretrain_view, dist_params_pretrain_view, H, W
+        )
+        # Views having high-score masks and from which object is fully visible
+        high_score_inds = [
+            list(set(hs) & set(vis))
+            for hs, vis in zip(high_score_inds, visible)
+        ]
 
         # Compute finer object 3D segmentation
         # Initialize a 3D voxel grid
@@ -750,7 +761,7 @@ class ChangeDet:
                 Ks_pretrain_view[high_score_inds[ii]],
                 dist_params_pretrain_view[high_score_inds[ii]],
                 masks[ii][high_score_inds[ii]],
-                cutoff=0.95
+                cutoff=0.99
             )
             obj3Dseg = Object3DSeg(
                 *expanded_bbox3d, occ_grid, pose_change, bbox3d,
