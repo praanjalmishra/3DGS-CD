@@ -86,7 +86,8 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
         gaussians (Dict): gaussian parameters
 
     Returns:
-        rgb (HxWx3 Tensor): RGB image
+        rgb (1x3xHxW Tensor): RGB image
+        depth_im (1x1xHxW Tensor): Depth image
     """
     if not isinstance(cam, Cameras):
         print("Called get_outputs with not a camera")
@@ -174,7 +175,7 @@ def render_3dgs_at_cam(cam, gaussians, device="cuda"):
         return_alpha=True,
     )  # type: ignore
     alpha = alpha[..., None]
-    rgb = torch.clamp(rgb, max=1.0).detach()
+    rgb = torch.clamp(rgb, max=1.0)
     rgb = rgb.unsqueeze(0).permute(0, 3, 1, 2)
     depth_im = None
     depth_im = rasterize_gaussians(  # type: ignore

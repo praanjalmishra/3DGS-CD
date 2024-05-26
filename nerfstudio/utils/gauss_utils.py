@@ -11,21 +11,28 @@ def rot2quat(rotmat):
     Rotation matrix to quaternion conversion
 
     Args:
-        rotmat: rotation matrix of shape (B, 3, 3)
+        rotmat (B, 3, 3): rotation matrices
 
     Returns:
-        quat: quaternion of shape (B, 4)
+        quat (B, 4): quaternions in the order of wxyz
     """
-    from scipy.spatial.transform import Rotation as R
-    rot = rotmat.cpu().numpy()
-    # Create a rotation object from the rotation matrices
-    rotation = R.from_matrix(rot)
-    # Convert to quaternions, initially in xyzw order
-    quat_xyzw = rotation.as_quat()
-    # Rearrange to wxyz order
-    quat_wxyz = np.hstack((quat_xyzw[:, -1:], quat_xyzw[:, :-1]))
-    quat_wxyz = torch.tensor(quat_wxyz).to(rotmat)
-    return quat_wxyz
+    assert rotmat.shape[1:] == (3, 3), "Rotation mat must be (B, 3, 3)"
+    # Extract the elements of the rotation matrix
+    r11, r12, r13 = rotmat[:, 0, 0], rotmat[:, 0, 1], rotmat[:, 0, 2]
+    r21, r22, r23 = rotmat[:, 1, 0], rotmat[:, 1, 1], rotmat[:, 1, 2]
+    r31, r32, r33 = rotmat[:, 2, 0], rotmat[:, 2, 1], rotmat[:, 2, 2]
+    # Compute the trace of the rotation matrix
+    trace = r11 + r22 + r33
+    # Using numerical stability trick to avoid division by zero
+    def safe_sqrt(x):
+        return torch.sqrt(torch.clamp(x, min=1e-10))
+    # Quaternion calculation
+    w = 0.5 * safe_sqrt(1 + trace)
+    x = 0.5 * safe_sqrt(1 + r11 - r22 - r33) * torch.sign(r32 - r23)
+    y = 0.5 * safe_sqrt(1 - r11 + r22 - r33) * torch.sign(r13 - r31)
+    z = 0.5 * safe_sqrt(1 - r11 - r22 + r33) * torch.sign(r21 - r12)
+    quat = torch.stack([w, x, y, z], dim=-1)
+    return quat
 
 
 def transform_gaussians(pose, means, quats):
@@ -43,10 +50,9 @@ def transform_gaussians(pose, means, quats):
     """
     assert pose.shape == (4, 4)
     assert means.shape[0] == quats.shape[0]
-    pose = pose.to(means.device)
+    # pose = pose.to(means.device)
     means_new = (pose[:3, :3] @ means.T + pose[:3, 3:]).T
     # Rotate the Gaussians
-
     quats = quats / quats.norm(dim=-1, keepdim=True)
     rots = quat_to_rotmat(quats)
     obj_rots_new = pose[:3, :3] @ rots
