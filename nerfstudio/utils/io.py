@@ -25,6 +25,7 @@ from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.utils.poses import to4x4
 
 
 def load_from_json(filename: Path):
@@ -128,6 +129,30 @@ def save_masks(masks, paths):
         mask = mask.squeeze(0).cpu().numpy() * 255
         mask = Image.fromarray(mask.astype(np.uint8))
         mask.save(path)
+
+
+def cameras_to_params(cameras, device="cuda"):
+    """
+    Convert a Cameras intrinsic and extrinsic and dimension parameters
+
+    Args:
+        cameras (Cameras): Cameras object
+
+    Returns:
+        poses (Bx4x4): Camera parameters
+        Ks (Bx3x3): Camera intrinsics
+        dist_params (Bx4): Camera distortion parameters
+        H (int): Image height
+        W (int): Image width
+    """
+    poses = to4x4(cameras.camera_to_worlds).to(device)
+    poses[:, 0:3, 1:3] = -poses[:, 0:3, 1:3] # OpenGL to OpenCV
+    Ks = cameras.get_intrinsics_matrices().to(device)
+    dist_params6 = cameras.distortion_params.to(device)
+    dist_params = dist_params6[:, [0, 1, 4, 5]]
+    H = cameras.height.squeeze()[0].item()
+    W = cameras.width.squeeze()[0].item()
+    return poses, Ks, dist_params, H, W
 
 
 def params_to_cameras(poses, intrinsics, dist_coeffs, H, W):
