@@ -88,6 +88,25 @@ class Object3DSeg:
         combined = torch.stack([self.bbox_min, self.bbox_max], dim=1)
         corners = torch.tensor(list(itertools.product(*combined)))
         return corners.to(self.voxel.device)
+    
+    def get_obj_coords(self):
+        """
+        Get the coordinates of the obj occupied voxels
+
+        Returns:
+            coords (N, 3 tensor): Occupied voxel coordinates
+        """
+        x_min, y_min, z_min = self.bbox_min.cpu().numpy().ravel()
+        x_max, y_max, z_max = self.bbox_max.cpu().numpy().ravel()
+        x_step = (x_max - x_min) / (self.voxel.shape[0] - 1)
+        y_step = (y_max - y_min) / (self.voxel.shape[1] - 1)
+        z_step = (z_max - z_min) / (self.voxel.shape[2] - 1)
+        obj_coords = torch.nonzero(self.voxel)
+        x_coords = x_min + obj_coords[:, 0] * x_step
+        y_coords = y_min + obj_coords[:, 1] * y_step
+        z_coords = z_min + obj_coords[:, 2] * z_step
+        coords = torch.stack([x_coords, y_coords, z_coords], dim=-1)
+        return coords
 
     def dilate_uniform(self, kernel_size=1):
         """

@@ -26,12 +26,14 @@ from nerfstudio.utils.effsam_utils import (
     effsam_batch_predict, compute_2D_bbox, expand_2D_bbox
 )
 from nerfstudio.utils.eval_utils import eval_setup
+from nerfstudio.utils.gauss_utils import transform_gaussians
 from nerfstudio.utils.img_utils import (
     extract_depths_at_pixels, image_align, filter_features_with_mask,
-    in_image
+    in_image, points2D_to_point_masks
 )
 from nerfstudio.utils.io import (
-    read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras
+    read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras,
+    cameras_to_params
 )
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
@@ -41,10 +43,8 @@ from nerfstudio.utils.pcd_utils import (
 from nerfstudio.utils.proj_utils import (
     depths_to_points, proj_check_3D_points, project_points
 )
-from nerfstudio.utils.render_utils import render_cameras
-# from nerfstudio.utils.sam_utils import (
-#     sam_embedding, sam_predict, sam_refine_masks
-# )
+from nerfstudio.utils.poses import to4x4
+from nerfstudio.utils.render_utils import render_cameras, render_3dgs_at_cam
 
 
 def camera_clone(cameras):
@@ -310,14 +310,15 @@ class ChangeDet:
         ]
         return pcds, pcd_feats
 
-    def pretrain_iteration(self, rgbs, masks, cameras):
+    def pretrain_iteration(self, rgbs, masks, cameras, gaussians):
         """
-        Forward pass through the pre-trained 3DGS
+        Forward pass through the transformed pre-trained 3DGS
 
         Args:
             rgbs (Nx3xHxW): Captured sparse view RGB images
             masks (Nx1xHxW): Sampling masks on the sparse views
             cameras (Cameras): NeRFStudio Cameras object of size N
+            gaussians (dict): Transformed Gaussian parameters
 
         Returns:
             rgb_loss: RGB loss btw the captured and rendered pixels
@@ -331,7 +332,11 @@ class ChangeDet:
         loss_accumulated = torch.tensor(0.0, device=rgbs.device)
         for ii, batch in enumerate(batches):
             camera = cameras[ii:ii+1]
-            outputs = self.pipeline_pretrain.model(camera)
+            # outputs = self.pipeline_pretrain.model(camera)
+            color, _ = render_3dgs_at_cam(camera, gaussians)
+            outputs = {
+                "rgb": color.squeeze().permute(1, 2, 0), "background": None
+            }
             loss_dict = self.pipeline_pretrain.model.get_loss_dict(
                 outputs, batch, None
             )
@@ -344,53 +349,95 @@ class ChangeDet:
         return loss_accumulated
 
     def refine_obj_pose_change(
-        self, pose_init, rgbs, masks, cameras,
-        lr=1e-3, epochs=500, patience=100
+        self, rgbs, obj_segs, cameras, lr=1e-3, epochs=500, patience=100
     ):
         """
         Refine object pose change to make the object pose pixel-perfect
         TODO: Use pose change to move Gaussians instead of cameras for batch
 
         Args:
-            pose_init (4x4): Object pose change initial value
             rgbs (Nx3xHxW): Captured sparse view RGB images
-            masks (Nx1xHxW): Object masks on the sparse views
+            obj_segs (M-list of Obj3DSeg): Object 3D segments
             cameras (Cameras): NeRFStudio Cameras object
             batch_size (int): Batch size for training
             epochs (int): Number of epochs
             patience (int): Number of epochs to wait for plateau
         
         Returns:
-            pose_refined (4x4): Refined object pose change
+            poses_refined (M-list of 4x4): Refined object pose change
         """
         from nerfstudio.cameras.lie_groups import exp_map_SO3xR3
-        from nerfstudio.utils.poses import to4x4
         assert hasattr(self, "pipeline_pretrain"), \
             "Pre-training pipeline not loaded yet"
-        assert pose_init.shape == (4, 4)
-        cam_init = camera_clone(cameras)
         device = rgbs.device
+        cameras.camera_to_worlds = cameras.camera_to_worlds.to(device)
+        c2w, Ks, dist, H, W = cameras_to_params(cameras, device)
+        # Project object 3D seg voxel grid points to have obj's masks        
+        in_objs, poses_init, obj_masks = [], [], []
+        for obj_seg in obj_segs:
+            in_obj = obj_seg.query(self.pipeline_pretrain.model.means)
+            pose_init = obj_seg.pose_change.clone().to(device)
+            obj_pts = obj_seg.get_obj_coords()
+            obj_pts_moved = (
+                pose_init[:3, :3] @ obj_pts.T + pose_init[:3, 3:]
+            ).T.to(device).reshape(-1, 3)
+            obj_proj, in_img = project_points(
+                obj_pts_moved, c2w, Ks, dist, H, W
+            )
+            obj_mask = points2D_to_point_masks(obj_proj, in_img, H, W, 0)
+            in_objs.append(in_obj)
+            poses_init.append(pose_init)
+            obj_masks.append(obj_mask)
+        obj_masks = torch.any(torch.stack(obj_masks, dim=0), dim=0)
         # Uncomment to debug
-        # debug_masks(masks, self.debug_dir)
+        # debug_masks(obj_masks, self.debug_dir)
+        # Pre-trained Gaussians
+        gauss0 = {
+            name: self.pipeline_pretrain.model.gauss_params[name].data.clone()
+            for name in [
+                "means", "scales", "quats", "features_dc", "features_rest",
+                "opacities"
+            ]
+        }
         # Make a pose update parameter
-        pose_update = torch.nn.Parameter(
-            torch.zeros((1, 6), device=device)
+        poses_update = torch.nn.Parameter(
+            torch.zeros((len(poses_init), 6), device=device)
         )
-        optimizer = torch.optim.Adam([pose_update], lr=lr)
+        optimizer = torch.optim.Adam([poses_update], lr=lr)
         # Training loop
         best_loss, initial_loss = float("inf"), None
         plateau_count = 0
         with tqdm(total=epochs, desc="pose change opt") as pbar:
             for idx in range(epochs):
                 optimizer.zero_grad()
-                pose_update4x4 = to4x4(exp_map_SO3xR3(pose_update))
-                pose_update4x4 = pose_update4x4.reshape(4, 4)
-                # Map new cameras to corresponding pre-training cameras
-                pretrain_cam = new_cams_to_pretrain(
-                    cam_init, pose_init @ pose_update4x4
-                )
+                poses_update4x4 = to4x4(exp_map_SO3xR3(poses_update))
+                poses_update4x4 = poses_update4x4.reshape(-1, 4, 4)
+                # Transform object Gaussians
+                assert self.pipeline_pretrain.model.means.shape[0] > 0
+                means, quats = gauss0["means"], gauss0["quats"]
+                for pose_init, in_obj, pose_update4x4 in zip(
+                    poses_init, in_objs, poses_update4x4
+                ):
+                    means_trans, quats_trans = transform_gaussians(
+                        pose_init @ pose_update4x4,
+                        gauss0["means"], gauss0["quats"]
+                    )
+                    means = torch.where(
+                        in_obj.unsqueeze(-1).repeat(1, 3), means_trans, means
+                    )
+                    quats = torch.where(
+                        in_obj.unsqueeze(-1).repeat(1, 4), quats_trans, quats
+                    )
+                gauss = {
+                    name : gauss0[name] for name in [
+                        "scales", "features_dc", "features_rest", "opacities"
+                    ]
+                }
+                gauss["means"], gauss["quats"] = means, quats
                 # Forward pass
-                rgb_loss = self.pretrain_iteration(rgbs, masks, pretrain_cam)
+                rgb_loss = self.pretrain_iteration(
+                    rgbs, obj_masks, cameras, gauss
+                )
                 # Backward pass
                 rgb_loss.backward()
                 optimizer.step()
@@ -410,8 +457,11 @@ class ChangeDet:
                         break
         if rgb_loss.item() > initial_loss:
             print("Warning: RGB loss increased after pose change refinement")
-        pose_refined = pose_init @ pose_update4x4.detach()
-        return pose_refined
+        poses_refined = [
+            pose_init @ pose_update4x4.detach() for pose_init, pose_update4x4
+            in zip(poses_init, poses_update4x4)
+        ]
+        return poses_refined
 
     def check_visibility(
         self, pcds, masks, poses, Ks, dist_params, H, W, threshold=0.95
@@ -683,59 +733,6 @@ class ChangeDet:
         # # Uncomment to debug
         # debug_point_cloud(pcds[0], self.debug_dir)
 
-        # Refine object pose change
-        if refine_pose:
-            new_cameras = params_to_cameras(
-                cam_poses_sparse_view, Ks_sparse_view, 
-                dist_params_sparse_view, H, W
-            )
-            # Move obj pcds and project to sparse views to obtain 2D bboxes
-            bboxes2d = []
-            for ii, (pcd, ps_chg) in enumerate(zip(pcds, pose_changes)):
-                pcd_recfg = (ps_chg[:3, :3] @ pcds[ii].T + ps_chg[:3, 3:4]).T
-                pcd_proj, is_point_in_img = project_points(
-                    pcd_recfg, cam_poses_sparse_view, Ks_sparse_view,
-                    dist_params_sparse_view, H, W
-                )
-                if not is_point_in_img.all():
-                    print("WARN: Some points are out of the pretraining images")
-                # debug_point_prompts(
-                #     rgbs_captured_sparse_view, pcd_proj, self.debug_dir
-                # )
-                bbox2d = compute_2D_bbox(pcd_proj)
-                bbox2d = expand_2D_bbox(
-                    bbox2d, configs["pre_train_pred_bbox_expand"]
-                )
-                bboxes2d.append(bbox2d)
-            bboxes2d = torch.stack(bboxes2d, dim=1) # NxMx4
-            # SAM predict move-in masks on sparse-view captured images
-            masks_move_in_sparse_view, scores = [], []
-            for img, bbox2d in tqdm(
-                zip(rgbs_captured_sparse_view, bboxes2d), desc="SAM predict"
-            ):
-                mask, score = effsam_batch_predict(img[None], bbox2d)
-                masks_move_in_sparse_view.append(mask)
-                scores.append(score)
-            masks_move_in_sparse_view = torch.stack(
-                masks_move_in_sparse_view, dim=1
-            ) # MxNx1xHxW
-            scores = [list(t) for t in zip(*scores)] # M-list of N-list
-            for ii, pose_change in enumerate(pose_changes):
-                obj_masks_move_in_sparse_view = masks_move_in_sparse_view[ii]
-                high_score = [i for i, s in enumerate(scores[ii]) if s > 0.95]
-                assert len(high_score) > 0, "No good move-in masks"
-                high_score = torch.from_numpy(np.array(high_score).astype(int))
-                pose_changes[ii] = self.refine_obj_pose_change(
-                    pose_change, rgbs_captured_sparse_view[high_score],
-                    obj_masks_move_in_sparse_view[high_score],
-                    new_cameras[high_score],
-                    lr=configs["pose_refine_lr"],
-                    epochs=configs["pose_refine_epochs"],
-                    patience=configs["pose_refine_patience"]
-                )
-                print(
-                    f"refined pose_change: \n {pose_changes[ii].cpu().numpy()}"
-                )
 
         # Project the object point cloud to dense old views to get 2D bboxes
         bboxes2d = []
@@ -799,12 +796,14 @@ class ChangeDet:
             print(f"#Views for 3D seg: {len(inds)} / {len(Ks_pretrain_view)}")
 
         # Compute finer object 3D segmentation
-        # Initialize a 3D voxel grid
-        for ii, pcd in enumerate(pcds):
-            bbox3d = compute_3D_bbox(pcd)
+        obj_segs = []
+        for ii in range(len(pcds)):
+            bbox3d = compute_3D_bbox(pcds[ii])
             print(f"bbox3d: {bbox3d}")
             expanded_bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
-            voxel = bbox2voxel(bbox3d, configs["voxel_dim"], self.device)
+            voxel = bbox2voxel(
+                expanded_bbox3d, configs["voxel_dim"], self.device
+            )
             occ_grid = proj_check_3D_points(
                 voxel, cam_poses_pretrain_view[high_score_inds[ii]], 
                 Ks_pretrain_view[high_score_inds[ii]],
@@ -813,14 +812,30 @@ class ChangeDet:
                 cutoff=0.95
             )
             obj3Dseg = Object3DSeg(
-                *expanded_bbox3d, occ_grid, pose_change, bbox3d,
+                *expanded_bbox3d, occ_grid, pose_changes[ii], bbox3d,
                 configs["move_out_dilate"], 
                 configs["mask3d_dilate_uniform"],
                 configs["mask3d_dilate_top"]
             )
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
-        obj3Dseg.save(self.output_dir)
+        if refine_pose:
+            new_cameras = params_to_cameras(
+                cam_poses_sparse_view, Ks_sparse_view, 
+                dist_params_sparse_view, H, W
+            )
+            # for ii in range(len(obj_segs)):
+            pose_changes = self.refine_obj_pose_change(
+                rgbs_captured_sparse_view, obj_segs, new_cameras,
+                lr=configs["pose_refine_lr"],
+                epochs=configs["pose_refine_epochs"],
+                patience=configs["pose_refine_patience"]
+            )
+            for ii, pose_change in enumerate(pose_changes):
+                obj_segs[ii].pose_change = pose_change
+                print(
+                    f"refined: \n {obj_segs[ii].pose_change.cpu().numpy()}"
+                )
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
     parser.add_argument(
