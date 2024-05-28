@@ -219,7 +219,7 @@ class ChangeDet:
             feats_all.append(feat_i)
         return feats_all
 
-    def match_move_out(self, rgbs, depths, masks, poses, Ks):
+    def match_move_out(self, rgbs, depths, masks, poses, Ks, pcd_filter=0.9):
         """
         Match move-out masks across multiple images
 
@@ -258,7 +258,7 @@ class ChangeDet:
             pcd = compute_point_cloud(
                 depths[0:1], poses[0:1], Ks[0:1], masks[0][j:j+1]
             )
-            pcd = point_cloud_filtering(pcd, 0.95)
+            pcd = point_cloud_filtering(pcd, pcd_filter)
             pcds.append(pcd)
             pcd_sizes.append(pcd_size(pcd))
             pcd_counts.append(1)
@@ -276,7 +276,7 @@ class ChangeDet:
                 pcd = compute_point_cloud(
                     depths[i:i+1], poses[i:i+1], Ks[i:i+1], masks[i][j:j+1]
                 )
-                pcd = point_cloud_filtering(pcd, 0.95)
+                pcd = point_cloud_filtering(pcd, pcd_filter)
                 for k in range(len(pcds)):
                     dist_mat[k, j] = nn_distance(pcds[k], pcd)
                 new_pcds.append(pcd)
@@ -377,14 +377,7 @@ class ChangeDet:
         for obj_seg in obj_segs:
             in_obj = obj_seg.query(self.pipeline_pretrain.model.means)
             pose_init = obj_seg.pose_change.clone().to(device)
-            obj_pts = obj_seg.get_obj_coords()
-            obj_pts_moved = (
-                pose_init[:3, :3] @ obj_pts.T + pose_init[:3, 3:]
-            ).T.to(device).reshape(-1, 3)
-            obj_proj, in_img = project_points(
-                obj_pts_moved, c2w, Ks, dist, H, W
-            )
-            obj_mask = points2D_to_point_masks(obj_proj, in_img, H, W, 0)
+            obj_mask = obj_seg.project_new(c2w, Ks, dist, H, W)
             in_objs.append(in_obj)
             poses_init.append(pose_init)
             obj_masks.append(obj_mask)
@@ -532,10 +525,9 @@ class ChangeDet:
                 "move_out_dilate": 31,
                 "pose_change_break": None,
                 "pose_refine_lr": 1e-3,
-                "pose_refine_epochs": 500,
-                "pose_refine_patience": 100,
-                "move_out_2D_dilate": 41,
-                "move_in_2D_dilate":31
+                "pose_refine_epochs": 100,
+                "pose_refine_patience": 20,
+                "vis_check_threshold": 0.8
             }
         else:
             json_path = Path(configs)
@@ -683,7 +675,8 @@ class ChangeDet:
             depths_sparse_view[no_overlap_ind], 
             [masks_move_out_sparse_view[i] for i in no_overlap_ind],
             cam_poses_sparse_view[no_overlap_ind],
-            Ks_sparse_view[no_overlap_ind]
+            Ks_sparse_view[no_overlap_ind],
+            pcd_filter=configs["pcd_filtering"]
         )
         # Object pose change estimate
         feats = self.get_features_in_masks(
@@ -783,7 +776,8 @@ class ChangeDet:
         # Check visibility of object point clouds
         visible = self.check_visibility(
             pcds, masks_move_out_pretrain_view, cam_poses_pretrain_view,
-            Ks_pretrain_view, dist_params_pretrain_view, H, W
+            Ks_pretrain_view, dist_params_pretrain_view, H, W,
+            threshold=configs["vis_check_threshold"]
         )
         for vv in visible:
             print(f"Visible views: {len(vv)} / {len(cam_poses_pretrain_view)}")

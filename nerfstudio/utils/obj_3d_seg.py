@@ -180,8 +180,55 @@ class Object3DSeg:
         inside = torch.zeros_like(in_bbox).to(points.device)
         inside[in_bbox] = occupancy > 0.5
         return inside
-    
-    def save(self, output_dir):
+
+    def project(self, poses, Ks, dist_coeffs, H, W, kernel_size=0):
+        """
+        Project the object points to camera views
+
+        Args:
+            poses (Nx4x4 tensor): Camera poses
+            Ks (Nx3x3 tensor): Camera intrinsics
+            dist_coeffs (Nx4 tensor): Camera distortion coefficients
+            H (int): Image height
+            W (int): Image width
+            kernel_size (int): Kernel size for closing the mask
+        
+        Returns:
+            masks (Nx1xHxW tensor): Projected masks
+        """
+        obj_pts = self.get_obj_coords()
+        verts_proj, proj_valid = project_points(
+            obj_pts, poses, Ks, dist_coeffs, H, W
+        )
+        masks = points2D_to_point_masks(
+            verts_proj, proj_valid, H, W, kernel_size
+        )
+        return masks
+
+    def project_new(self, poses, Ks, dist_coeffs, H, W, kernel_size=0):
+        """
+        Project reconfigured objects' points to camera views
+
+        Args:
+            poses (Nx4x4 tensor): Camera poses
+            Ks (Nx3x3 tensor): Camera intrinsics
+            dist_coeffs (Nx4 tensor): Camera distortion coefficients
+            H (int): Image height
+            W (int): Image width
+            kernel_size (int): Kernel size for closing the mask
+        
+        Returns:
+            masks (Nx1xHxW tensor): Projected 2D masks
+        """
+        obj_pts = self.get_obj_coords()
+        obj_pts_moved = (
+            self.pose_change[:3, :3] @ obj_pts.T + self.pose_change[:3, 3:]
+        ).T.reshape(-1, 3)
+        obj_proj, in_img = project_points(
+            obj_pts_moved, poses, Ks, dist_coeffs, H, W
+        )
+        masks = points2D_to_point_masks(obj_proj, in_img, H, W, kernel_size)
+        return masks
         """
         Save the input of object 3D segmentation
 
