@@ -29,7 +29,7 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.gauss_utils import transform_gaussians
 from nerfstudio.utils.img_utils import (
     extract_depths_at_pixels, image_align, filter_features_with_mask,
-    in_image, points2D_to_point_masks
+    in_image, points2D_to_point_masks, split_masks
 )
 from nerfstudio.utils.io import (
     read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras,
@@ -650,7 +650,8 @@ class ChangeDet:
                 for i, s in enumerate(scores_render) if s > 0.95
             ]
             masks_out = torch.cat(masks_out, dim=0) if len(masks_out) > 0\
-                else torch.empty(0, 1, H, W, device=device) 
+                else torch.empty(0, 1, H, W, device=device)
+            masks_out = split_masks(masks_out)
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])

@@ -126,6 +126,34 @@ def invert_mask(mask_file, output_file):
     inverted_mask.save(output_file)
 
 
+def split_masks(masks, threshold=1e-2):
+    """
+    Split disconnected masks in a batch of masks
+
+    Args:
+        masks (Nx1xHxW): Binary masks
+
+    Returns:
+        split_masks (Mx1xHxW): Split masks (M >= N)
+    """
+    assert len(masks) == 4 and masks.shape[1] == 1, "Masks must be Nx1xHxW"
+    masks_np = masks.cpu().numpy()
+    H = masks.shape[-2]
+    W = masks.shape[-1]
+    split_masks_np = []
+    for mask_np in tqdm(masks_np, desc="Split masks"):
+        mask_np = mask_np[0]
+        # Find connected components
+        num_labels, labels = cv2.connectedComponents(mask_np.astype(np.uint8))
+        for i in range(1, num_labels):
+            # Split the masks
+            component_mask = (labels == i).astype(np.uint8)
+            if component_mask.sum() > threshold * H * W:
+                split_masks_np.append(component_mask)
+    split_masks = torch.from_numpy(np.array(split_masks_np)).to(masks)
+    return split_masks.unsqueeze(1)
+
+
 def masks_to_focus(masks, kernel_ratio=0.15):
     """
     Dilate masks and only keep the new pixels masked out
