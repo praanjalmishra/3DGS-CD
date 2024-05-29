@@ -649,9 +649,11 @@ class ChangeDet:
                 masks_render[i:i+1]
                 for i, s in enumerate(scores_render) if s > 0.95
             ]
-            masks_out = torch.cat(masks_out, dim=0) if len(masks_out) > 0\
-                else torch.empty(0, 1, H, W, device=device)
-            masks_out = split_masks(masks_out)
+            if len(masks_out) > 0:
+                masks_out = torch.cat(masks_out, dim=0)
+                masks_out = split_masks(masks_out)
+            else:
+                torch.empty(0, 1, H, W, device=device)
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
@@ -709,7 +711,8 @@ class ChangeDet:
                 if pose_change_i is None:
                     continue
                 # Equation in the paper
-                pose_change_i =  cam_poses_sparse_view[idx] @ pose_change_i.inverse()
+                pose_change_i = \
+                    cam_poses_sparse_view[idx] @ pose_change_i.inverse()
                 if configs["pose_change_break"] is not None and \
                     idx == configs["pose_change_break"]:
                     num_inliers = num_inlier_i
@@ -721,7 +724,7 @@ class ChangeDet:
                     num_matches = num_match_i
                     pose_change = pose_change_i
             pose_changes.append(pose_change)
-            assert pose_change is not None, "Object pose change estimation failed!"
+            assert pose_change is not None, "Object pose change est. failed!"
             print(f"pose_change: \n {pose_change.cpu().numpy()}")
             print(f"inlier_ratio: {num_inliers} / {num_matches}")
         # # Uncomment to debug

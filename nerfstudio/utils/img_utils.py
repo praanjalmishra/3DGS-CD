@@ -136,7 +136,7 @@ def split_masks(masks, threshold=1e-2):
     Returns:
         split_masks (Mx1xHxW): Split masks (M >= N)
     """
-    assert len(masks) == 4 and masks.shape[1] == 1, "Masks must be Nx1xHxW"
+    assert len(masks.shape) == 4 and masks.shape[1] == 1
     masks_np = masks.cpu().numpy()
     H = masks.shape[-2]
     W = masks.shape[-1]
