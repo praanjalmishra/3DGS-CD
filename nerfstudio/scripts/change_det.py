@@ -653,7 +653,7 @@ class ChangeDet:
                 masks_out = torch.cat(masks_out, dim=0)
                 masks_out = split_masks(masks_out)
             else:
-                torch.empty(0, 1, H, W, device=device)
+                masks_out = torch.empty(0, 1, H, W, device=device)
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])

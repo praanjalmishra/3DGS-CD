@@ -150,6 +150,8 @@ def split_masks(masks, threshold=1e-2):
             component_mask = (labels == i).astype(np.uint8)
             if component_mask.sum() > threshold * H * W:
                 split_masks_np.append(component_mask)
+    if len(split_masks_np) == 0:
+        return torch.zeros(0, 1, H, W).to(masks)
     split_masks = torch.from_numpy(np.array(split_masks_np)).to(masks)
     return split_masks.unsqueeze(1)
 
