@@ -527,7 +527,7 @@ class ChangeDet:
                 "pose_refine_lr": 1e-3,
                 "pose_refine_epochs": 100,
                 "pose_refine_patience": 20,
-                "vis_check_threshold": 0.8
+                "proj_check_cutoff": 0.95
             }
         else:
             json_path = Path(configs)
@@ -675,7 +675,7 @@ class ChangeDet:
         # Multi-view move-out mask association 
         pcds, pcd_feats = self.match_move_out(
             rgbs_render_sparse_view[no_overlap_ind],
-            depths_sparse_view[no_overlap_ind], 
+            depths_sparse_view[no_overlap_ind],
             [masks_move_out_sparse_view[i] for i in no_overlap_ind],
             cam_poses_sparse_view[no_overlap_ind],
             Ks_sparse_view[no_overlap_ind],
@@ -688,7 +688,7 @@ class ChangeDet:
         )
         pose_changes = []
         num_sparse_views = len(masks_move_out_sparse_view)
-        for pcd_feat in pcd_feats:
+        for ii, pcd_feat in enumerate(pcd_feats):
             num_inliers, num_matches = 0, 0
             pose_change = None            
             for idx in tqdm(range(num_sparse_views), desc="pose estimation"):
@@ -704,8 +704,8 @@ class ChangeDet:
                 # debug_matches(
                 #     rgbs_render_sparse_view[0:1], 
                 #     rgbs_captured_sparse_view[idx:idx+1],
-                #     m3d_proj[:, :1, :], [m2d[:1, :]],
-                #     torch.arange(1)[None, :, None].repeat(1, 1, 2),
+                #     m3d_proj[:, :, :], [m2d[:, :]],
+                #     torch.arange(m2d.shape[0])[None, :, None].repeat(1, 1, 2),
                 #     self.debug_dir
                 # )
                 if pose_change_i is None:
@@ -714,7 +714,8 @@ class ChangeDet:
                 pose_change_i = \
                     cam_poses_sparse_view[idx] @ pose_change_i.inverse()
                 if configs["pose_change_break"] is not None and \
-                    idx == configs["pose_change_break"]:
+                    configs["pose_change_break"][ii] is not None and \
+                    idx == configs["pose_change_break"][ii]:
                     num_inliers = num_inlier_i
                     num_matches = num_match_i
                     pose_change = pose_change_i
@@ -807,7 +808,7 @@ class ChangeDet:
                 Ks_pretrain_view[high_score_inds[ii]],
                 dist_params_pretrain_view[high_score_inds[ii]],
                 masks_move_out_pretrain_view[ii][high_score_inds[ii]],
-                cutoff=0.95
+                cutoff=configs["proj_check_cutoff"]
             )
             obj3Dseg = Object3DSeg(
                 *expanded_bbox3d, occ_grid, pose_changes[ii], bbox3d,
@@ -817,6 +818,7 @@ class ChangeDet:
             )
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
+            obj_segs.append(obj3Dseg)
         if refine_pose:
             new_cameras = params_to_cameras(
                 cam_poses_sparse_view, Ks_sparse_view, 

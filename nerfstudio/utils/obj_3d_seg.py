@@ -19,7 +19,7 @@ class Object3DSeg:
     """
     def __init__(
         self, bbox_min, bbox_max, voxel, pose_change,
-        tight_bbox=None, dilate=31
+        tight_bbox=None, mask_dilate_uniform=0, mask_dilate_top=5
     ):
         """
         Args:
@@ -42,11 +42,13 @@ class Object3DSeg:
         self.pose_change = pose_change
         # NOTE: We must dilate the object 3D segmentation to account for
         #       densities exceeding the object boundaries
-        self.dilate = dilate
-        self.voxel_dilated = self.dilate_uniform(dilate)
+        self.mask_dilate_uniform = mask_dilate_uniform
+        self.mask_dilate_top = mask_dilate_top
         # self.visualize("/home/ziqi/Desktop/test")
-        # self.voxel = self.dilate_uniform(1)
-        self.voxel = self.dilate_top(7)
+        if mask_dilate_uniform > 0:
+            self.voxel = self.dilate_uniform(mask_dilate_uniform)
+        if mask_dilate_top > 0:
+            self.voxel = self.dilate_top(mask_dilate_top)
 
     def get_bbox(self):
         """
@@ -146,8 +148,7 @@ class Object3DSeg:
         )
         voxel = torch.from_numpy(voxel).to(self.voxel.device)
         return voxel
-
-    def query(self, points, dilate=False):
+    def query(self, points):
         """
         Query the object 3D seg at points to determine whether they are inside
 
@@ -171,9 +172,46 @@ class Object3DSeg:
         grid = points_in_bbox.unsqueeze(0).unsqueeze(0).unsqueeze(0)
         grid = torch.flip(grid, dims=(-1,)) # grid_sample 3D uses zyx order
         # Trilinear interpolation to extract occupancy values
-        voxel = self.voxel_dilated if dilate else self.voxel
         occupancy = torch.nn.functional.grid_sample(
-            voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
+            self.voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
+            align_corners=True
+        ).squeeze()
+        # Occupancy check
+        inside = torch.zeros_like(in_bbox).to(points.device)
+        inside[in_bbox] = occupancy > 0.5
+        return inside
+    
+    def query_new(self, points, dilate=False):
+        """
+        Query the binary voxel w/ points to see if they are in obj new 3D mask
+
+        Args:
+            points (..., 3): 3D query points
+            dilate (bool): Whether to use dilated voxel grid for query
+
+        Returns:
+            inside (...,): Whether the points are inside the object's new mask
+        """
+        assert points.shape[-1] == 3
+        # Transform points back to object's old 3D mask
+        pose_change_inv = torch.inverse(self.pose_change)
+        points_trans = torch.einsum(
+            "ij,...j->...i", pose_change_inv[:3, :3], points
+        ) + pose_change_inv[:3, 3]
+        in_bbox = (
+            (points_trans >= self.bbox_min) & (points_trans <= self.bbox_max)
+        ).all(dim=-1)
+        points_in_bbox = points[in_bbox]
+        if points_in_bbox.numel() == 0:
+            return torch.zeros_like(in_bbox).bool()
+        # Normalize the points to the bounding box
+        points_in_bbox = (points_in_bbox - self.bbox_min) / self.dims * 2 - 1
+        # Convert to voxel indices
+        grid = points_in_bbox.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        grid = torch.flip(grid, dims=(-1,))
+        # Trilinear interpolation to extract occupancy values
+        occupancy = torch.nn.functional.grid_sample(
+            self.voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
             align_corners=True
         ).squeeze()
         # Occupancy check
@@ -229,23 +267,26 @@ class Object3DSeg:
         )
         masks = points2D_to_point_masks(obj_proj, in_img, H, W, kernel_size)
         return masks
+
+    def save(self, output):
         """
         Save the input of object 3D segmentation
 
         Args:
-            output_dir (str): Directory to save the 3D object mask
+            output (str): Path to save the 3D object mask
         """
         data_to_save = {
             'bbox_min': self.bbox_min.cpu(), 'bbox_max': self.bbox_max.cpu(),
             'voxel': self.voxel_original.cpu(),
             'pose_change': self.pose_change.cpu(),
-            'dilate': self.dilate
+            'mask_dilate_uniform': self.mask_dilate_uniform,
+            'mask_dilate_top': self.mask_dilate_top
         }
         if self.tight_bbox is not None:
             data_to_save['tight_bbox'] = self.tight_bbox
         else:
             data_to_save['tight_bbox'] = None
-        torch.save(data_to_save, f"{output_dir}/obj3Dseg.pt")
+        torch.save(data_to_save, f"{output}")
 
     @classmethod
     def read_from_file(cls, file_path, device='cuda'):
@@ -271,72 +312,15 @@ class Object3DSeg:
             voxel=data['voxel'].to(device),
             tight_bbox=tight_bbox,
             pose_change=data['pose_change'].to(device),
-            dilate=data['dilate']
+            mask_dilate_uniform=data['mask_dilate_uniform'],
+            mask_dilate_top=data['mask_dilate_top']
         )
         print(f"Succesfully loaded the scene change estimates")
         print(f"Pose change:\n {obj.pose_change}")
         return obj
-
-    def set_appearance_weights(self, app_weights):
-        """
-        Set the appearance latent for the object
-
-        Args:
-            app_latent (2, N, N, N, C tensor): Appearance weights
-        """
-        assert app_weights.shape[0] == 2
-        assert len(app_weights.shape) == 5
-        self.appearance_weights = app_weights
-    
-    def Fourier_reconstruct(self, weights, coords):
-        """
-        Use the following Fourier decomposition to reconstruct a 4D signal
-
-        f(x, y, z) = \Sum_{i=1}^N \Sum_{j=1}^N \Sum_{k=1}^N
-        a_{ijk} * cos[2\pi (i*x + j*y + k*z)] +
-        b_{ijk} * sin[2\pi (i*x + j*y + k*z)]
-        NOTE: This is for one channel in the C dimension)
-
-        Args:
-            weights (2, N, N, N, C): Weights for the cos and sin modes
-            coords (..., 3): Coordinates to reconstruct the signal at
-
-        Returns:
-            signal (..., C): Reconstructed signal
-        """
-        assert coords.shape[-1] == 3
-        device = coords.device
-        # Only reconstruct for in bbox points
-        in_bbox = (
-            (coords >= self.bbox_min) & (coords <= self.bbox_max)
-        ).all(dim=-1, keepdim=True)
-        # Normalize the coordinates to the bounding box
-        coords = (coords - self.bbox_min) / self.dims
-        x, y, z = coords[..., 0], coords[..., 1], coords[..., 2]
-        # Get the Fourier modes
-        i = torch.arange(weights.size(1)).to(coords)
-        j = torch.arange(weights.size(2)).to(coords)
-        k = torch.arange(weights.size(3)).to(coords)
-        i, j, k = torch.meshgrid(i, j, k, indexing='ij')
-        weights = weights.to(coords)
-        # Reconstruct the signal
-        # TODO: Do this in chunks so the memo doesn't explode
-        ixjykz = torch.einsum("ijk,...->...ijk", i, x) + \
-            torch.einsum("ijk,...->...ijk", j, y) + \
-            torch.einsum("ijk,...->...ijk", k, z)
-        signal = torch.einsum(
-            "ijkc,...ijk->...c", weights[0], torch.cos(2 * torch.pi * ixjykz)
-        ) + torch.einsum(
-            "ijkc,...ijk->...c", weights[1], torch.sin(2 * torch.pi * ixjykz)
-        )
-        # Zero out the signal for points outside the bbox
-        signal = torch.where(
-            in_bbox, signal, torch.zeros_like(signal).to(device)
-        )
-        return signal
     
     def visualize(self, output_dir):
-        voxel = self.voxel_dilated.cpu().numpy()
+        voxel = self.voxel.cpu().numpy()
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
         xmin, ymin, zmin = self.bbox_min.cpu().numpy()
