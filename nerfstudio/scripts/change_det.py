@@ -102,7 +102,7 @@ class ChangeDet:
     """Directory to save debug output"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     """Device"""
-    extractor = SuperPoint(max_num_keypoints=2048).eval().to(device)
+    extractor = SuperPoint(max_num_keypoints=4096).eval().to(device)
     """SuperPoint extractor"""
     matcher = LightGlue(features='superpoint').eval().to(device)
     """LightGlue matcher"""
@@ -496,8 +496,7 @@ class ChangeDet:
         return vis
 
     def main(
-        self, transforms_json=None, configs=None,
-        refine_pose=True, cam_path=None
+        self, transforms_json=None, configs=None, refine_pose=True
     ):
         """
         Estimate object 2D masks, coarse 3D Bbox and pose change
@@ -527,6 +526,7 @@ class ChangeDet:
                 "pose_refine_lr": 1e-3,
                 "pose_refine_epochs": 100,
                 "pose_refine_patience": 20,
+                "vis_check_threshold": 0.8,
                 "proj_check_cutoff": 0.95
             }
         else:
@@ -852,5 +852,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Load hyperparams
+    hyperparams = f"{os.path.dirname(args.transform)}/configs.json"
+    hyperparams = hyperparams if os.path.exists(hyperparams) else None
+    # Detect changes
     change_det = ChangeDet(Path(args.config), Path(args.output))
-    change_det.main(transforms_json=args.transform)
+    change_det.main(
+        transforms_json=args.transform, configs=hyperparams
+    )
