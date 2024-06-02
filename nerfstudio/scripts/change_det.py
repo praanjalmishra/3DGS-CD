@@ -275,7 +275,7 @@ class ChangeDet:
                     pts3D = compute_feats_3D(
                         feats[i][k], depths[i:i+1], poses[i], Ks[i]
                     )
-                    pcd_feats.append(Obj3DFeats(feats[i][k], pts3D))
+                    pcd_feats.append(Obj3DFeats([feats[i][k]], [pts3D]))
         # Filter out object point clouds that appear in <25% of images
         pcds = [p for p, ct in zip(pcds, pcd_counts) if ct > N * 0.25]
         pcd_feats = [
@@ -639,7 +639,7 @@ class ChangeDet:
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
-        print("Number of moved objects: ", num_move_out)
+
         no_overlap_ind = []
         for i in range(len(masks_move_out_sparse_view)):
             if masks_move_out_sparse_view[i].size(0) >= num_move_out:
@@ -664,6 +664,7 @@ class ChangeDet:
             Ks_sparse_view[no_overlap_ind],
             pcd_filter=configs["pcd_filtering"]
         )
+        print("Number of moved objects: ", len(pcds))
         # Object pose change estimate
         feats = self.get_features_in_masks(
             rgbs_captured_sparse_view, 
@@ -776,6 +777,18 @@ class ChangeDet:
         ]
         for inds in high_score_inds:
             print(f"#Views for 3D seg: {len(inds)} / {len(Ks_pretrain_view)}")
+        
+        # # Uncomment to debug
+        # obj_ind_to_save = 0
+        # masks_to_save = masks_move_out_pretrain_view[obj_ind_to_save]\
+        #     [high_score_inds[obj_ind_to_save]]
+        # save_masks(
+        #     masks_to_save, [
+        #         f"{self.debug_dir}/masks_pretrain{ii}.png"
+        #         for ii in range(len(masks_to_save))
+        #     ]
+        # )
+
 
         # Compute finer object 3D segmentation
         obj_segs = []
@@ -795,7 +808,6 @@ class ChangeDet:
             )
             obj3Dseg = Object3DSeg(
                 *expanded_bbox3d, occ_grid, pose_changes[ii], bbox3d,
-                configs["move_out_dilate"], 
                 configs["mask3d_dilate_uniform"],
                 configs["mask3d_dilate_top"]
             )
