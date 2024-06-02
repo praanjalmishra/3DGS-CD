@@ -29,11 +29,11 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.gauss_utils import transform_gaussians
 from nerfstudio.utils.img_utils import (
     extract_depths_at_pixels, image_align, filter_features_with_mask,
-    in_image, points2D_to_point_masks, split_masks
+    in_image, split_masks
 )
 from nerfstudio.utils.io import (
-    read_dataset, read_imgs, read_transforms, save_masks, params_to_cameras,
-    cameras_to_params
+    load_from_json, write_to_json, read_dataset, read_imgs, read_transforms,
+    save_masks, params_to_cameras, cameras_to_params
 )
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
@@ -65,33 +65,6 @@ def camera_clone(cameras):
         width=cameras.width, height=cameras.height
     )
     return cameras_new
-
-
-def new_cams_to_pretrain(cameras, pose_change):
-    """
-    Map new cameras poses back to corresponding pre-training camera poses,
-    so that rendering with the pre-trained 3DGS at the updated poses
-    gives (almost) the same object appearance
-
-    Args:
-        cameras (Cameras): Camera poses wrt world
-        pose_change (4x4 tensor): Pose change
-
-    Returns:
-        c2w_new (Cameras): Updated camera poses wrt world
-    """
-    assert pose_change.shape == (4, 4)
-    # Read 4x4 camera poses
-    cameras = camera_clone(cameras)
-    c2w = cameras.camera_to_worlds.to(pose_change.device)
-    c2w = torch.cat([c2w, torch.zeros(c2w.shape[0], 1, 4).to(c2w)], dim=1)
-    c2w[:, 3, 3] = 1
-    c2w[:, 0:3, 1:3] = -c2w[:, 0:3, 1:3] # OpenGL to OpenCV
-    # Apply the pose change
-    c2w_new = pose_change.inverse() @ c2w
-    c2w_new[:, 0:3, 1:3] = -c2w_new[:, 0:3, 1:3] # OpenCV to OpenGL
-    cameras.camera_to_worlds = c2w_new[:, 0:3, :]
-    return cameras
 
 
 class ChangeDet:
@@ -349,11 +322,10 @@ class ChangeDet:
         return loss_accumulated
 
     def refine_obj_pose_change(
-        self, rgbs, obj_segs, cameras, lr=1e-3, epochs=500, patience=100
+        self, rgbs, obj_segs, cameras, lr=1e-3, epochs=100, patience=20
     ):
         """
         Refine object pose change to make the object pose pixel-perfect
-        TODO: Use pose change to move Gaussians instead of cameras for batch
 
         Args:
             rgbs (Nx3xHxW): Captured sparse view RGB images
@@ -365,6 +337,7 @@ class ChangeDet:
         
         Returns:
             poses_refined (M-list of 4x4): Refined object pose change
+            cameras (Cameras): Cameras w/ refined camera poses
         """
         from nerfstudio.cameras.lie_groups import exp_map_SO3xR3
         assert hasattr(self, "pipeline_pretrain"), \
@@ -377,11 +350,11 @@ class ChangeDet:
         for obj_seg in obj_segs:
             in_obj = obj_seg.query(self.pipeline_pretrain.model.means)
             pose_init = obj_seg.pose_change.clone().to(device)
-            obj_mask = obj_seg.project_new(c2w, Ks, dist, H, W)
+            obj_mask = ~obj_seg.project(c2w, Ks, dist, H, W)
             in_objs.append(in_obj)
             poses_init.append(pose_init)
             obj_masks.append(obj_mask)
-        obj_masks = torch.any(torch.stack(obj_masks, dim=0), dim=0)
+        obj_masks = torch.all(torch.stack(obj_masks, dim=0), dim=0)
         # Uncomment to debug
         # debug_masks(obj_masks, self.debug_dir)
         # Pre-trained Gaussians
@@ -392,11 +365,15 @@ class ChangeDet:
                 "opacities"
             ]
         }
+        cam0 = camera_clone(cameras)
         # Make a pose update parameter
         poses_update = torch.nn.Parameter(
             torch.zeros((len(poses_init), 6), device=device)
         )
-        optimizer = torch.optim.Adam([poses_update], lr=lr)
+        cam_pose_update = torch.nn.Parameter(
+            torch.zeros((len(cameras), 6), device=device)
+        )
+        optimizer = torch.optim.Adam([poses_update, cam_pose_update], lr=lr)
         # Training loop
         best_loss, initial_loss = float("inf"), None
         plateau_count = 0
@@ -405,6 +382,8 @@ class ChangeDet:
                 optimizer.zero_grad()
                 poses_update4x4 = to4x4(exp_map_SO3xR3(poses_update))
                 poses_update4x4 = poses_update4x4.reshape(-1, 4, 4)
+                cam_pose_update4x4 = to4x4(exp_map_SO3xR3(cam_pose_update))
+                cam_pose_update4x4 = cam_pose_update4x4.reshape(-1, 4, 4)
                 # Transform object Gaussians
                 assert self.pipeline_pretrain.model.means.shape[0] > 0
                 means, quats = gauss0["means"], gauss0["quats"]
@@ -427,6 +406,9 @@ class ChangeDet:
                     ]
                 }
                 gauss["means"], gauss["quats"] = means, quats
+                # Update camera pose
+                cameras.camera_to_worlds = \
+                    cam0.camera_to_worlds @ cam_pose_update4x4
                 # Forward pass
                 rgb_loss = self.pretrain_iteration(
                     rgbs, obj_masks, cameras, gauss
@@ -454,7 +436,7 @@ class ChangeDet:
             pose_init @ pose_update4x4.detach() for pose_init, pose_update4x4
             in zip(poses_init, poses_update4x4)
         ]
-        return poses_refined
+        return poses_refined, cameras
 
     def check_visibility(
         self, pcds, masks, poses, Ks, dist_params, H, W, threshold=0.95
@@ -499,13 +481,13 @@ class ChangeDet:
         self, transforms_json=None, configs=None, refine_pose=True
     ):
         """
-        Estimate object 2D masks, coarse 3D Bbox and pose change
+        Estimate moved objects' 3D masks and pose changes
 
         Args:
             transforms_json (Path or str):
                 transforms.json for the post-reconfig training dataset
-            save_masks (bool): If True, save the SAM-predicted 2D masks
-            focus (bool): Whether to focus point sampling at the changed areas
+            configs (Path or str): hyperparameters
+            refine_pose (bool): Refine object pose change and camera poses
 
         Returns:
             obj_3D_seg (list of Obj3DSeg): Object 3D segmentation
@@ -657,6 +639,7 @@ class ChangeDet:
             masks_move_out_sparse_view.append(masks_out)
         # Ignore views with overlapped move-out regions
         num_move_out = max([m.size(0) for m in masks_move_out_sparse_view])
+        print("Number of moved objects: ", num_move_out)
         no_overlap_ind = []
         for i in range(len(masks_move_out_sparse_view)):
             if masks_move_out_sparse_view[i].size(0) >= num_move_out:
@@ -825,7 +808,7 @@ class ChangeDet:
                 dist_params_sparse_view, H, W
             )
             # for ii in range(len(obj_segs)):
-            pose_changes = self.refine_obj_pose_change(
+            pose_changes, new_cameras = self.refine_obj_pose_change(
                 rgbs_captured_sparse_view, obj_segs, new_cameras,
                 lr=configs["pose_refine_lr"],
                 epochs=configs["pose_refine_epochs"],
@@ -836,6 +819,25 @@ class ChangeDet:
                 print(
                     f"refined: \n {obj_segs[ii].pose_change.cpu().numpy()}"
                 )
+        # Save object 3D segmentation w/ updated pose changes
+        for ii, obj_seg in enumerate(obj_segs):
+            obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
+
+        # Update sparse-view training camera poses
+        finetune_tjson = \
+            Path(transforms_json).parent / "transforms_finetune.json"
+        assert os.path.isfile(finetune_tjson), "Finetuning data missing"
+        finetune_data = load_from_json(finetune_tjson)
+        for ii, frame in enumerate(finetune_data["frames"]):
+            frame_id = re.search(r'(\d+)(?!.*\d)', frame["file_path"])
+            frame_id = int(frame_id.group())
+            if frame_id in sparse_view_file_ids:
+                frame_ind = sparse_view_file_ids.index(frame_id)
+                cam_pose_updated = new_cameras[frame_ind].camera_to_worlds
+                cam_pose_updated = to4x4(cam_pose_updated)
+                finetune_data["frames"][ii]["transform_matrix"] = \
+                    cam_pose_updated.detach().cpu().numpy().tolist()
+        write_to_json(finetune_tjson, finetune_data)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
     parser.add_argument(
