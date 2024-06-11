@@ -28,7 +28,8 @@ class Object3DSeg:
             voxel (N, M, K tensor): Binary voxel grid representing obj 3D seg
             pose_change (4x4 tensor): 6DoF object pose change
             tight_bbox (3-tuple-tuple): Tight bounding box for the object
-            dilate (int): #Iters to dilate the 3D mask to get move-out region
+            mask_dilate_uniform (int): Uniform dilation for the object mask
+            mask_dilate_top (int): Non-uniform dilation for the object mask
         """
         assert voxel.dtype == torch.bool
         assert all([min_ < max_ for min_, max_ in zip(bbox_min, bbox_max)])
@@ -148,13 +149,69 @@ class Object3DSeg:
         )
         voxel = torch.from_numpy(voxel).to(self.voxel.device)
         return voxel
-    def query(self, points):
+    
+    def dilate_dir(self, dir, kernel_size=1):
+        """
+        Dilate the binary voxel grid in a specific direction
+        We find the axis direction (+/-x, +/-y, +/-z) that is closest to the
+        input direction and dilate the mask in that direction
+
+        Args:
+            dir (3-tuple): Direction to dilate the mask
+            kernel_size (int): Size of the dilation kernel
+
+        Returns:
+            dilated_voxel (N, M, K tensor): Dilated voxel grid
+        """
+        dir = np.array(dir).ravel()
+        assert len(dir) == 3, "Direction must have 3 components"
+        # identify the axis with the closest axis direction
+        axis = np.argmax(np.abs(dir))
+        direction = np.sign(dir[axis])
+        # construct the structuring element
+        se = np.zeros((3, 3, 3), dtype=bool)
+        if direction > 0:
+            if axis == 0:  # x-axis
+                se[1:, 1, 1] = True
+            elif axis == 1:  # y-axis
+                se[1, 1:, 1] = True
+            elif axis == 2:  # z-axis
+                se[1, 1, 1:] = True
+        else:
+            if axis == 0:  # x-axis
+                se[:-1, 1, 1] = True
+            elif axis == 1:  # y-axis
+                se[1, :-1, 1] = True
+            elif axis == 2:  # z-axis
+                se[1, 1, :-1] = True
+        # Dilate along the closest axis direction
+        voxel = self.voxel.cpu().numpy()
+        voxel = binary_dilation(voxel, structure=se, iterations=kernel_size)
+        voxel = torch.from_numpy(voxel).to(self.voxel.device)
+        return voxel
+
+    def fill_under(self):
+        """
+        Dilate the binary voxel grid till the bottom of the object bbox
+        
+        Returns:
+            dilated_voxel (N, M, K tensor): Dilated voxel grid
+        """
+        voxel = self.voxel
+        flip_voxel = torch.flip(voxel, dims=(2,))
+        under_object_mask = torch.cumsum(flip_voxel, dim=2) > 0
+        under_object_mask = torch.flip(under_object_mask, dims=(2, ))
+        voxel[under_object_mask] = True
+        return voxel
+
+    def query(self, points, voxel=None):
         """
         Query the object 3D seg at points to determine whether they are inside
 
         Args:
             points (..., 3): 3D query points
             dilate (bool): Whether to use dilated voxel grid for query
+            voxel (N, M, K tensor or None): another voxel grid to query
 
         Returns:
             inside (...,): Whether the points are inside the object
@@ -172,8 +229,9 @@ class Object3DSeg:
         grid = points_in_bbox.unsqueeze(0).unsqueeze(0).unsqueeze(0)
         grid = torch.flip(grid, dims=(-1,)) # grid_sample 3D uses zyx order
         # Trilinear interpolation to extract occupancy values
+        voxel = self.voxel if voxel is None else voxel
         occupancy = torch.nn.functional.grid_sample(
-            self.voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
+            voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
             align_corners=True
         ).squeeze()
         # Occupancy check
@@ -181,7 +239,7 @@ class Object3DSeg:
         inside[in_bbox] = occupancy > 0.5
         return inside
     
-    def query_new(self, points, dilate=False):
+    def query_new(self, points):
         """
         Query the binary voxel w/ points to see if they are in obj new 3D mask
 
@@ -190,7 +248,7 @@ class Object3DSeg:
             dilate (bool): Whether to use dilated voxel grid for query
 
         Returns:
-            inside (...,): Whether the points are inside the object's new mask
+            inside (...): Whether the points are inside the object's new mask
         """
         assert points.shape[-1] == 3
         # Transform points back to object's old 3D mask
@@ -201,7 +259,7 @@ class Object3DSeg:
         in_bbox = (
             (points_trans >= self.bbox_min) & (points_trans <= self.bbox_max)
         ).all(dim=-1)
-        points_in_bbox = points[in_bbox]
+        points_in_bbox = points_trans[in_bbox]
         if points_in_bbox.numel() == 0:
             return torch.zeros_like(in_bbox).bool()
         # Normalize the points to the bounding box
@@ -215,7 +273,7 @@ class Object3DSeg:
             align_corners=True
         ).squeeze()
         # Occupancy check
-        inside = torch.zeros_like(in_bbox).to(points.device)
+        inside = torch.zeros_like(in_bbox).to(points.device).bool()
         inside[in_bbox] = occupancy > 0.5
         return inside
 
@@ -416,6 +474,8 @@ class Obj3DFeats:
         for obj_feats, obj_pts3D in zip(self.feats, self.pts3D): 
             mm = matcher({'image0': obj_feats, 'image1': feats})
             _, _, mm = [rbd(x) for x in [obj_feats, feats, mm]]
+            # Uncomment to filter low-confidence matches
+            # mm["matches"] = mm["matches"][mm["scores"] > 0.5, :]
             matched3D = obj_pts3D[mm["matches"][:, 0]]
             matches.append(mm["matches"][:, 1])
             matched_pts3D.append(matched3D)
