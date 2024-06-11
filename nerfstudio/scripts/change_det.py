@@ -322,7 +322,8 @@ class ChangeDet:
         return loss_accumulated
 
     def refine_obj_pose_change(
-        self, rgbs, obj_segs, cameras, lr=1e-3, epochs=100, patience=20
+        self, rgbs, obj_segs, cameras, lr=1e-3, epochs=100, patience=20,
+        optim="obj+cam"
     ):
         """
         Refine object pose change to make the object pose pixel-perfect
@@ -334,6 +335,7 @@ class ChangeDet:
             batch_size (int): Batch size for training
             epochs (int): Number of epochs
             patience (int): Number of epochs to wait for plateau
+            optim (str): Variables to optim, choices: "obj+cam", "obj", "cam"
         
         Returns:
             poses_refined (M-list of 4x4): Refined object pose change
@@ -373,7 +375,13 @@ class ChangeDet:
         cam_pose_update = torch.nn.Parameter(
             torch.zeros((len(cameras), 6), device=device)
         )
-        optimizer = torch.optim.Adam([poses_update, cam_pose_update], lr=lr)
+        param = []
+        if "obj" in optim:
+            param.append(poses_update)
+        if "cam" in optim:
+            param.append(cam_pose_update)
+        assert len(param) > 0, "No parameters to optimize"
+        optimizer = torch.optim.Adam(param, lr=lr)
         # Training loop
         best_loss, initial_loss = float("inf"), None
         plateau_count = 0
@@ -628,8 +636,8 @@ class ChangeDet:
             )
             # Move-out masks have SAM prediction score > 0.95 on rendered image
             masks_out = [
-                masks_render[i:i+1]
-                for i, s in enumerate(scores_render) if s > 0.95
+                masks_render[i:i+1] for i, s in enumerate(scores_render)
+                if s > configs["sam_threshold"]
             ]
             if len(masks_out) > 0:
                 masks_out = torch.cat(masks_out, dim=0)
@@ -756,7 +764,7 @@ class ChangeDet:
         # Get high score mask indices
         high_score_inds = []
         for ss in scores:
-            high_score = [i for i, x in enumerate(ss) if x > 0.95]
+            high_score = [i for i, x in enumerate(ss) if x > configs["sam_threshold"]]
             if len(high_score) > 0:
                 print(f"High score masks: {len(high_score)} / {len(ss)}")
             else:
@@ -814,6 +822,7 @@ class ChangeDet:
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
             obj_segs.append(obj3Dseg)
+        # Global pose refinement
         if refine_pose:
             new_cameras = params_to_cameras(
                 cam_poses_sparse_view, Ks_sparse_view, 
@@ -834,6 +843,23 @@ class ChangeDet:
         # Save object 3D segmentation w/ updated pose changes
         for ii, obj_seg in enumerate(obj_segs):
             obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
+        
+        # Optimize eval camera poses
+        if refine_pose:
+            rgbs_eval, eval_fnames, _, _, _, cams_eval = \
+                read_transforms(transforms_json, mode="val")
+            _, cams_eval = self.refine_obj_pose_change(
+                rgbs_eval.to(device), obj_segs, cams_eval,
+                lr=configs["pose_refine_lr"],
+                epochs=configs["pose_refine_epochs"],
+                patience=configs["pose_refine_patience"], optim="cam"
+            )
+            eval_file_ids = []
+            for ii, path in enumerate(eval_fnames):
+                id_str = re.search(r'(\d+)(?!.*\d)', path.name)
+                if not id_str:
+                    raise ValueError("Train filenames must contain numbers")
+                eval_file_ids.append(int(id_str.group()))
 
         # Update sparse-view training camera poses
         finetune_tjson = \
@@ -846,6 +872,12 @@ class ChangeDet:
             if frame_id in sparse_view_file_ids:
                 frame_ind = sparse_view_file_ids.index(frame_id)
                 cam_pose_updated = new_cameras[frame_ind].camera_to_worlds
+                cam_pose_updated = to4x4(cam_pose_updated)
+                finetune_data["frames"][ii]["transform_matrix"] = \
+                    cam_pose_updated.detach().cpu().numpy().tolist()
+            if frame_id in eval_file_ids:
+                frame_ind = eval_file_ids.index(frame_id)
+                cam_pose_updated = cams_eval[frame_ind].camera_to_worlds
                 cam_pose_updated = to4x4(cam_pose_updated)
                 finetune_data["frames"][ii]["transform_matrix"] = \
                     cam_pose_updated.detach().cpu().numpy().tolist()
