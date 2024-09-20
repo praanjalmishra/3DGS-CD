@@ -35,6 +35,7 @@ from nerfstudio.utils.io import (
     load_from_json, write_to_json, read_dataset, read_imgs, read_transforms,
     save_masks, params_to_cameras, cameras_to_params
 )
+from nerfstudio.utils.misc import extract_last_number
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
 from nerfstudio.utils.pcd_utils import (
     compute_3D_bbox, compute_point_cloud, expand_3D_bbox,
@@ -545,15 +546,13 @@ class ChangeDet:
             sparse_view_file_ids, train_file_ids = [], []
             sparse_view_indices, pretrain_indices = [], []
             for ii, path in enumerate(img_fnames):
-                id_str = re.search(r'(\d+)(?!.*\d)', path.name)
-                if not id_str:
-                    raise ValueError("Train filenames must contain numbers")
+                id_int = extract_last_number(path.name)
                 if "rgb_new" in path.as_posix():
-                    sparse_view_file_ids.append(int(id_str.group()))
+                    sparse_view_file_ids.append(id_int)
                     sparse_view_indices.append(ii)
                 else:
                     pretrain_indices.append(ii)
-                train_file_ids.append(int(id_str.group()))
+                train_file_ids.append(id_int)
 
             N, _, H, W = color_images.shape
             # Get sparse-view captured images
@@ -786,15 +785,54 @@ class ChangeDet:
         for inds in high_score_inds:
             print(f"#Views for 3D seg: {len(inds)} / {len(Ks_pretrain_view)}")
         
-        # # Uncomment to debug
+        # # Uncomment to train object-3DGS
         # obj_ind_to_save = 0
         # masks_to_save = masks_move_out_pretrain_view[obj_ind_to_save]\
         #     [high_score_inds[obj_ind_to_save]]
-        # save_masks(
-        #     masks_to_save, [
-        #         f"{self.debug_dir}/masks_pretrain{ii}.png"
-        #         for ii in range(len(masks_to_save))
-        #     ]
+        # if not os.path.isdir(f"{self.output_dir}/rgb_obj"):
+        #     os.makedirs(f"{self.output_dir}/rgb_obj", exist_ok=True)
+        # good_inds = [
+        #     train_file_ids[pretrain_indices[ii]]
+        #     for ii in high_score_inds[obj_ind_to_save]
+        # ]
+        # rgb_img_list = [
+        #     f"{self.output_dir}/rgb/frame_{ii:05g}.png" for ii in good_inds
+        # ]
+        # mask_img_list = [
+        #     f"{self.debug_dir}/mask_pretrain{ii}.png" for ii in good_inds
+        # ]
+        # save_masks(masks_to_save, mask_img_list)
+        # from nerfstudio.utils.img_utils import rgb2rgba
+        # rgb2rgba(rgb_img_list, mask_img_list, f"{self.output_dir}/rgb_obj/")
+        # pretrain_json = \
+        #     Path(transforms_json).parent / "transforms_pretrain.json"
+        # assert os.path.isfile(pretrain_json), "Pretrain data missing"
+        # pretrain_data = load_from_json(pretrain_json)
+        # obj_data_frames = []
+        # for frame in pretrain_data["frames"]:
+        #     frame_id = extract_last_number(frame["file_path"])
+        #     if frame_id in good_inds:
+        #         frame["file_path"] = f"rgb_obj/frame_{frame_id:05g}.png"
+        #         obj_data_frames.append(frame)
+        # pretrain_data["frames"] = obj_data_frames
+        # write_to_json(
+        #     Path(transforms_json).parent / "transforms_obj.json",
+        #     pretrain_data
+        # )
+        # # train object 3DGS by running the following command
+        # # ns-train splatfacto --pipeline.model.background-color random
+
+        # from nerfstudio.utils.io import save_alpha_transparent_train_data
+        # gt_pose_change=torch.tensor(
+        #     [[1, 0,  0, 2.5 / 11.0], 
+        #     [0,  0, -1, 3.0 / 11.0], 
+        #     [0,  1,  0, 0.5 / 11.0], 
+        #     [0,  0,  0, 1]]
+        # ).to(pose_change)        
+        # save_alpha_transparent_train_data(
+        #     masks, masks_move_in_sparse_view, pose_change, 
+        #     Path(transforms_json).parent, self.output_dir,
+        #     gt_pose_change=gt_pose_change
         # )
 
 
@@ -856,10 +894,8 @@ class ChangeDet:
             )
             eval_file_ids = []
             for ii, path in enumerate(eval_fnames):
-                id_str = re.search(r'(\d+)(?!.*\d)', path.name)
-                if not id_str:
-                    raise ValueError("Train filenames must contain numbers")
-                eval_file_ids.append(int(id_str.group()))
+                id_int = extract_last_number(path.name)
+                eval_file_ids.append(id_int)
 
         # Update sparse-view training camera poses
         finetune_tjson = \
@@ -867,8 +903,7 @@ class ChangeDet:
         assert os.path.isfile(finetune_tjson), "Finetuning data missing"
         finetune_data = load_from_json(finetune_tjson)
         for ii, frame in enumerate(finetune_data["frames"]):
-            frame_id = re.search(r'(\d+)(?!.*\d)', frame["file_path"])
-            frame_id = int(frame_id.group())
+            frame_id = extract_last_number(frame["file_path"])
             if frame_id in sparse_view_file_ids:
                 frame_ind = sparse_view_file_ids.index(frame_id)
                 cam_pose_updated = new_cameras[frame_ind].camera_to_worlds

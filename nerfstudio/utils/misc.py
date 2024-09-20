@@ -18,6 +18,7 @@ Miscellaneous helper code.
 
 
 import platform
+import re
 import typing
 import warnings
 from inspect import currentframe
@@ -219,3 +220,12 @@ def get_orig_class(obj, default=None):
             finally:
                 del frame
         return default
+
+
+def extract_last_number(s: str) -> int:
+    # finds the last group of digits in the string
+    match = re.search(r'(\d+)(?!.*\d)', s)  
+    if match:
+        return int(match.group())
+    else:
+        raise ValueError(f"No number found in string {s}")
