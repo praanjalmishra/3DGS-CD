@@ -47,6 +47,8 @@ from nerfstudio.utils.gauss_utils import (
     get_gaussian_endpts, transform_gaussians, rot2quat, sample_gaussians,
     fit_gaussian_batch
 )
+from nerfstudio.utils.img_utils import crop_imgs_w_masks
+from nerfstudio.utils.render_utils import render_3dgs_at_cam
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.obj_3d_seg import Object3DSeg
 from nerfstudio.utils.io import read_transforms
@@ -771,34 +773,6 @@ class Splatfacto2Model(Model):
             new_dups[name] = param[dup_mask]
         return new_dups
 
-    def fit_gaussian_batch(self, points, masks):
-        """
-        Fit 3D Gaussians to a batch of points with valid masks
-
-        Args:
-            points (BxNx3): 3D points in a batch
-            masks (BxN): mask in a batch
-
-        Returns:
-            means (Bx3): Gaussian means
-            covariances (Bx3x3): Gaussian covariances
-        """
-        assert len(masks) > 0 and masks.sum(dim=-1).min() > 0
-        masks_f = masks.float()
-        masked_points = points * masks_f.unsqueeze(-1)
-        sum_masked_points = torch.sum(masked_points, dim=1)
-        count_masked_points = torch.sum(masks_f, dim=1, keepdim=True)
-        means = sum_masked_points / count_masked_points
-        # Correct the mean shape and compute demeaned points
-        demeaned = masked_points - means.unsqueeze(1)
-        # Correct broadcasting for outer products
-        outer_product = torch.einsum('bni,bnj->bnij', demeaned, demeaned)
-        weighted_outer_product = outer_product * masks_f.unsqueeze(-1).unsqueeze(-1)
-        # Ensure proper division by broadcasting count_masked_points correctly
-        covariances = torch.sum(weighted_outer_product, dim=1) \
-            / (count_masked_points.unsqueeze(-1) - 1)
-        return means, covariances
-
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
@@ -957,8 +931,14 @@ class Splatfacto2Model(Model):
                 [quats_crop, self.gauss_params_fixed["quats"]], dim=0
             )
         else:
-            if self.training:
-                return {}                
+            if self.training or self.means.shape[0] == 0:
+                rgb = background.repeat(H, W, 1)
+                depth = background.new_ones(*rgb.shape[:2], 1) * 10
+                accumulation = background.new_zeros(*rgb.shape[:2], 1)
+                return {
+                    "rgb": rgb, "depth": depth, "accumulation": accumulation,
+                    "background": background
+                }
 
         colors_crop = torch.cat((features_dc_crop[:, None, :], features_rest_crop), dim=1)
         BLOCK_WIDTH = 16  # this controls the tile size of rasterization, 16 is a good default
@@ -1195,10 +1175,28 @@ class Splatfacto2Model(Model):
         if "mask" in batch:
             mask = batch["mask"].to(self.device)
             mask = torch.moveaxis(mask, -1, 0)[None, ...]
-            psnr_in = self.psnr_masked(gt_rgb, predicted_rgb, mask)
-            psnr_out = self.psnr_masked(gt_rgb, predicted_rgb, ~mask)
-            metrics_dict["psnr_in"] = float(psnr_in.item())
-            metrics_dict["psnr_out"] = float(psnr_out.item())
+            if hasattr(self, "masks_out"):
+                img_idx = batch["image_idx"]
+                mask_out = self.masks_out[0][img_idx:img_idx+1].to(self.device)
+                psnr_out = self.psnr_masked(gt_rgb, predicted_rgb, mask_out)
+                metrics_dict["psnr_out"] = float(psnr_out.item())
+                gt_rgb_crop = crop_imgs_w_masks(gt_rgb, mask_out)
+                pred_rgb_crop = crop_imgs_w_masks(predicted_rgb, mask_out)
+                ssim_out = self.ssim(gt_rgb_crop, pred_rgb_crop)
+                lpips_out = self.lpips(gt_rgb_crop, pred_rgb_crop)
+                metrics_dict["ssim_out"] = float(ssim_out)
+                metrics_dict["lpips_out"] = float(lpips_out)
+            if hasattr(self, "masks_in"):
+                img_idx = batch["image_idx"]
+                mask_in  = self.masks_in[0][img_idx:img_idx+1].to(self.device)
+                psnr_in = self.psnr_masked(gt_rgb, predicted_rgb, mask_in)
+                metrics_dict["psnr_in"] = float(psnr_in.item())
+                gt_rgb_crop = crop_imgs_w_masks(gt_rgb, mask_in)
+                pred_rgb_crop = crop_imgs_w_masks(predicted_rgb, mask_in)
+                ssim_out = self.ssim(gt_rgb_crop, pred_rgb_crop)
+                lpips_out = self.lpips(gt_rgb_crop, pred_rgb_crop)
+                metrics_dict["ssim_in"] = float(ssim_out)
+                metrics_dict["lpips_in"] = float(lpips_out)
 
         images_dict = {"img": combined_rgb}
 

@@ -168,7 +168,7 @@ class ChangeDet:
         #     )
         return masks
 
-    def get_features_in_masks(self, rgbs, masks):
+    def get_features_in_masks(self, rgbs, masks, flip=False):
         """
         Extract SuperPoint descriptors in the masked regions
 
@@ -180,6 +180,11 @@ class ChangeDet:
             feats (N-list of M-list of TxC): SuperPoint descriptors
         """
         assert rgbs.shape[1] == 3 and len(rgbs) == len(masks)
+        if flip:
+            # Rotate images by 180 degrees if flip is True
+            rgbs = torch.flip(rgbs, [2, 3])
+            for m in masks:
+                m = torch.flip(m, [2, 3])
         feats_all = []
         for i in range(len(rgbs)):
             feat_i = []
@@ -189,6 +194,10 @@ class ChangeDet:
                 feat["keypoints"].clamp_(min=0)
                 # Filter keypoints using masks
                 feat = filter_features_with_mask(feat, masks[i][j:j+1])
+                if flip:
+                    H, W = rgbs.shape[2], rgbs.shape[3]
+                    feat['keypoints'][:, 0] = W - feat['keypoints'][:, 0] - 1
+                    feat['keypoints'][:, 1] = H - feat['keypoints'][:, 1] - 1
                 feat_i.append(feat)
             feats_all.append(feat_i)
         return feats_all

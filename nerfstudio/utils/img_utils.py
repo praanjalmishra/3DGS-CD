@@ -108,6 +108,30 @@ def dilate_masks(masks, kernel_size=3):
     return dilated_masks.unsqueeze(1)
 
 
+def erode_masks(masks, kernel_size=3):
+    """
+    Erode binary masks using scipy's binary_erosion.
+    
+    Args:
+        masks (Nx1xHxW): Binary masks
+        kernel_size (int): Number of erosion iterations
+
+    Returns:
+        eroded_masks (Nx1xHxW): Eroded masks        
+    """
+    masks_np = masks.cpu().numpy()
+    eroded_masks_np=[]
+    for mask_np in tqdm(masks_np, desc="Erode images"):
+        eroded_mask_np = cv2.erode(
+            mask_np[0].astype(np.uint8),
+            np.ones((kernel_size, kernel_size), np.uint8),
+            iterations=1
+        )
+        eroded_masks_np.append(eroded_mask_np)
+    eroded_masks = torch.from_numpy(np.array(eroded_masks_np)).to(masks)
+    return eroded_masks.unsqueeze(1)
+
+
 def invert_mask(mask_file, output_file):
     """Invert colors of a mask image.
 
