@@ -509,7 +509,6 @@ class ChangeDet:
 
         Returns:
             obj_3D_seg (list of Obj3DSeg): Object 3D segmentation
-            pose_change: (list of 4x4 tensors) Object pose change
         """
         if configs is None:
             configs = {

@@ -239,7 +239,7 @@ class Object3DSeg:
         inside[in_bbox] = occupancy > 0.5
         return inside
     
-    def query_new(self, points):
+    def query_new(self, points, voxel=None):
         """
         Query the binary voxel w/ points to see if they are in obj new 3D mask
 
@@ -268,6 +268,7 @@ class Object3DSeg:
         grid = points_in_bbox.unsqueeze(0).unsqueeze(0).unsqueeze(0)
         grid = torch.flip(grid, dims=(-1,))
         # Trilinear interpolation to extract occupancy values
+        voxel = self.voxel if voxel is None else voxel
         occupancy = torch.nn.functional.grid_sample(
             self.voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
             align_corners=True

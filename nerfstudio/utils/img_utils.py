@@ -302,7 +302,7 @@ def points2D_to_point_masks(points2D, valid2D, H, W, kernel_size=3):
         valid_pts2D = pts2D[valid2D[idx]]
         mask = np.zeros((H, W), dtype=np.uint8)
         if len(valid_pts2D) != 0: # If no points in image, all-black mask
-            valid_pts2D = valid_pts2D.cpu().numpy().astype(np.int32)
+            valid_pts2D = valid_pts2D.detach().cpu().numpy().astype(np.int32)
             is_in_img = in_image(valid_pts2D, H, W)
             valid_pts2D = valid_pts2D[is_in_img]
             mask[valid_pts2D[:, 1], valid_pts2D[:, 0]] = 255
