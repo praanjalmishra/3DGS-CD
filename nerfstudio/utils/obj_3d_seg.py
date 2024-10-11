@@ -270,7 +270,7 @@ class Object3DSeg:
         # Trilinear interpolation to extract occupancy values
         voxel = self.voxel if voxel is None else voxel
         occupancy = torch.nn.functional.grid_sample(
-            self.voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
+            voxel.float().unsqueeze(0).unsqueeze(0), grid.float(),
             align_corners=True
         ).squeeze()
         # Occupancy check

@@ -494,6 +494,57 @@ class ChangeDet:
                     vis_ii.append(jj)
             vis.append(vis_ii)
         return vis
+    
+    def occl_aware_mask_proj(self, cams, obj_segs, dilate=0.15, new=False):
+        """
+        Project object 3D segmentation to target cameras w/ occlusion-awareness
+        
+        cams (Cameras): Target camera views
+        obj_segs (M-list of Obj3DSeg): Object 3D segments
+        dilate (float): Dilate the 3D segments to check if points in mask
+        new (bool): Use object's new pose for mask projection
+
+        Returns:
+            masks (Nx1xHxW): 2D move-out or -in masks on the target views
+        """
+        # Render depths at target cameras
+        poses, Ks, dist, H, W = cameras_to_params(cams)
+        _, depths = render_cameras(
+            self.pipeline_pretrain, cams, device=self.device
+        )
+        # Project object 3D segmentation to target
+        masks_no_occl_all_obj = []
+        for obj_seg in obj_segs:
+            if not new:
+                masks = obj_seg.project(poses, Ks, dist, H, W)
+            else:
+                masks = obj_seg.project_new(poses, Ks, dist, H, W)
+            # dilate the 3D segments due to noise
+            voxel_dilated = obj_seg.dilate_uniform(
+                int(obj_seg.voxel.size(0) * dilate)
+            )
+            masks_no_occl = []
+            for dd, pp, kk, mm in zip(depths, poses, Ks, masks):
+                pcd_in_mask = compute_point_cloud(
+                    dd[None], pp[None], kk[None], mm[None]
+                )
+                if not new:
+                    not_occluded = obj_seg.query(pcd_in_mask, voxel_dilated)
+                else:
+                    not_occluded = obj_seg.query_new(pcd_in_mask, voxel_dilated)
+                change_inds = (mm==1).nonzero()
+                change_inds_no_occl = change_inds[not_occluded]
+                mm_no_occl = torch.zeros_like(mm)
+                mm_no_occl[
+                    0, change_inds_no_occl[:, 1], change_inds_no_occl[:, 2]
+                ] = 1
+                masks_no_occl.append(mm_no_occl)
+            masks_no_occl = torch.stack(masks_no_occl, dim=0)
+            masks_no_occl_all_obj.append(masks_no_occl)
+        masks_no_occl_union = torch.any(
+            torch.stack(masks_no_occl_all_obj, dim=0), dim=0
+        )
+        return masks_no_occl_union
 
     def main(
         self, transforms_json=None, configs=None, refine_pose=True
@@ -925,6 +976,37 @@ class ChangeDet:
                 finetune_data["frames"][ii]["transform_matrix"] = \
                     cam_pose_updated.detach().cpu().numpy().tolist()
         write_to_json(finetune_tjson, finetune_data)
+
+
+        # Save all-white masks to mask_new folder
+        if not os.path.exists(self.output_dir / "masks_new"):
+            os.makedirs(self.output_dir / "masks_new")
+        mask_files = [
+            self.output_dir / "masks_new" / f"mask_{ii:05g}.png"
+            for ii in sparse_view_file_ids
+        ]
+        save_masks(torch.ones(len(mask_files), 1, H, W), mask_files)
+        # Save eval masks
+        _, val_files, _, _, _, _ = read_transforms(
+            transforms_json, read_images=False, mode="val"
+        )
+        val_masks_move_out_no_occl = self.occl_aware_mask_proj(
+            cams_eval, obj_segs, new=False
+        )
+        val_masks_move_in_no_occl = self.occl_aware_mask_proj(
+            cams_eval, obj_segs, new=True
+        )
+        val_file_ids = []
+        for ii, path in enumerate(val_files):
+            id_int = extract_last_number(path.name)
+            val_file_ids.append(id_int)
+        mask_files = [
+            self.output_dir / "masks_new" / f"mask_{ii:05g}.png"
+            for ii in val_file_ids
+        ]
+        save_masks(val_masks_move_out_no_occl, mask_files)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="3DGS change detection")
     parser.add_argument(
