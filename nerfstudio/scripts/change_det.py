@@ -19,7 +19,7 @@ from nerfstudio.cameras.cameras import Cameras
 from nerfstudio.models.splatfacto import SplatfactoModel
 from nerfstudio.utils.debug_utils import (
     debug_image_pairs, debug_images, debug_masks, debug_matches,
-    debug_point_cloud, debug_point_prompts
+    debug_point_cloud, debug_point_prompts, debug_depths
 )
 from nerfstudio.utils.effsam_utils import (
     effsam_predict, effsam_embedding, effsam_refine_masks,
@@ -509,9 +509,42 @@ class ChangeDet:
         """
         # Render depths at target cameras
         poses, Ks, dist, H, W = cameras_to_params(cams)
-        _, depths = render_cameras(
-            self.pipeline_pretrain, cams, device=self.device
-        )
+        if not new:
+            _, depths = render_cameras(
+                self.pipeline_pretrain, cams, device=self.device
+            )
+        else:
+            gauss0 = {
+                name: self.pipeline_pretrain.model.gauss_params[name].data.clone()
+                for name in [
+                    "means", "scales", "quats", "features_dc", "features_rest",
+                    "opacities"
+                ]
+            }
+            means, quats = gauss0["means"], gauss0["quats"]
+            for obj_seg in obj_segs:
+                in_obj = obj_seg.query(self.pipeline_pretrain.model.means)
+                means_trans, quats_trans = transform_gaussians(
+                    obj_seg.pose_change, gauss0["means"], gauss0["quats"]
+                )
+                means = torch.where(
+                    in_obj.unsqueeze(-1).repeat(1, 3), means_trans, means
+                )
+                quats = torch.where(
+                    in_obj.unsqueeze(-1).repeat(1, 4), quats_trans, quats
+                )
+            gauss = {
+                name : gauss0[name] for name in [
+                    "scales", "features_dc", "features_rest", "opacities"
+                ]
+            }
+            gauss["means"], gauss["quats"] = means, quats
+            depths = []
+            for ii in range(len(cams)):
+                _, depth = render_3dgs_at_cam(cams[ii:ii+1], gauss)
+                depths.append(depth)
+            depths = torch.cat(depths, dim=0)
+        # debug_depths(depths, self.debug_dir)
         # Project object 3D segmentation to target
         masks_no_occl_all_obj = []
         for obj_seg in obj_segs:
