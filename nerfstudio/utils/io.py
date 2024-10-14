@@ -150,8 +150,12 @@ def cameras_to_params(cameras, device="cuda"):
     Ks = cameras.get_intrinsics_matrices().to(device)
     dist_params6 = cameras.distortion_params.to(device)
     dist_params = dist_params6[:, [0, 1, 4, 5]]
-    H = cameras.height.squeeze()[0].item()
-    W = cameras.width.squeeze()[0].item()
+    if cameras.height.numel() > 1:
+        H = cameras.height.squeeze()[0].item()
+        W = cameras.width.squeeze()[0].item()
+    else:
+        H = cameras.height.squeeze().item()
+        W = cameras.width.squeeze().item()
     return poses, Ks, dist_params, H, W
 
 
