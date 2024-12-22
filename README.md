@@ -9,5 +9,17 @@ TLDR: We estimate **3D object-level changes** from two sets of unaligned RGB ima
 
 [![Watch the video](https://via.placeholder.com/100)](https://github.com/user-attachments/assets/ef073079-6bed-4a06-8f0e-4e765a5fd680)
 
+## Data
 
-Our code and data will be released soon!
+The **3DGS-CD dataset** can be found [here](https://drive.google.com/drive/folders/1OPUu643bkbAoryASNMi8_iDJGnypotc0?usp=drive_link).
+All the RGB images have been pre-processed (i.e. downscaled and undistorted).
+Below is the structure of the data folder:
+```
+scene_name
+  -rgb: Pre-change images
+  -rgb_new: Post-change images
+  -rgb_eval: Evaluation images at novel post-change views
+  -masks_gt: Ground truth change masks for evaluation images
+```
+
+Our code will be released soon!
