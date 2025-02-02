@@ -209,6 +209,37 @@ def remove_depth_path(json_file, output_file):
         json.dump(data, file, indent=4)
 
 
+def remove_pretrain_views(json_file, output_file):
+    """
+    Exclude pre-training views from the training data
+
+    Args:
+        json_file: Input transforms.json file.
+        output_file: Path to the output json file.  
+    """
+    with open(json_file, 'r') as file:
+        data = json.load(file)
+    
+    assert 'train_filenames' in data,\
+        "No training data found in the json file."
+
+    # Remove pre-training views from the training data
+    train_filenames = []
+    for filename in data['train_filenames']:
+        if "rgb_new" in filename:
+            train_filenames.append(filename)
+    data['train_filenames'] = train_filenames
+    frames = []
+    for fr in data['frames']:
+        if "rgb_new" in fr['file_path']:
+            frames.append(fr)
+    data['frames'] = frames
+
+    # Write the updated JSON data back to the output file
+    with open(output_file, 'w') as file:
+        json.dump(data, file, indent=4)
+
+
 def change_new_view_indices(json_file, output_file, new_view_indices):
     """
     Change the indices of new views in transforms.json.
@@ -284,6 +315,7 @@ if __name__ == '__main__':
     parser.add_argument('--add_masks', "-am", action='store_true')
     parser.add_argument('--add_depth', "-ad", action='store_true')
     parser.add_argument('--remove_depth', "-rd", action='store_true')
+    parser.add_argument('--remove_pretrain', "-rp", action='store_true')
     parser.add_argument("--eval_new", "-en", action='store_true')
     parser.add_argument("--eval_old", "-eo", action='store_true')
     parser.add_argument("--eval_all_pix", "-ea", action='store_true')
@@ -306,6 +338,9 @@ if __name__ == '__main__':
 
     if args.remove_depth:
         remove_depth_path(args.json, args.out)
+    
+    if args.remove_pretrain:
+        remove_pretrain_views(args.json, args.out)
 
     if args.eval_new:
         assert not args.eval_old, \

@@ -63,7 +63,6 @@ def point_cloud_filtering(point_cloud, percentile_threshold=0.90):
         point_cloud_inliers (Mx3): inlier point cloud
     """
     # Compute the centroid of the point cloud
-    # TODO: make this averaging operation more robust to outliers
     centroid = torch.median(point_cloud, dim=-2)[0]
     # Compute distances of all points to the centroid
     distances = torch.norm(point_cloud - centroid, dim=-1)
