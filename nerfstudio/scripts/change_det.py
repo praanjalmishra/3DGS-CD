@@ -29,11 +29,11 @@ from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.gauss_utils import transform_gaussians
 from nerfstudio.utils.img_utils import (
     extract_depths_at_pixels, image_align, filter_features_with_mask,
-    in_image, split_masks
+    in_image, split_masks, dilate_masks
 )
 from nerfstudio.utils.io import (
     load_from_json, write_to_json, read_dataset, read_imgs, read_transforms,
-    save_masks, params_to_cameras, cameras_to_params
+    save_masks, params_to_cameras, cameras_to_params, save_imgs
 )
 from nerfstudio.utils.misc import extract_last_number
 from nerfstudio.utils.obj_3d_seg import Object3DSeg, Obj3DFeats
@@ -101,6 +101,7 @@ class ChangeDet:
 
         Return:
             masks (Mx1xHxW): Masks for the changed regions
+            masks_all (Mx1xHxW): masks + change regions occupying small areas
         """
         H, W = capture.shape[-2:]
         device = render.device
@@ -128,6 +129,9 @@ class ChangeDet:
         # Calculate cosine similarity between embeddings
         norm1 = torch.nn.functional.normalize(emb1, p=2, dim=1)
         norm2 = torch.nn.functional.normalize(emb2, p=2, dim=1)
+        # # Uncomment to debug
+        # save_imgs(norm1[:, :3], [f"{self.debug_dir}/feat1.png"])
+        # save_imgs(norm2[:, :3], [f"{self.debug_dir}/feat2.png"])
         similarity_map = torch.nn.functional.cosine_similarity(
             norm1, norm2, dim=1
         )
@@ -149,24 +153,25 @@ class ChangeDet:
         )
         contours = sorted(contours, key=cv2.contourArea, reverse=True)
         # Obtain masks for large enough contours
-        masks = []
+        masks, masks_all = [], []
         for contour in contours:
-            if cv2.contourArea(contour) < threshold * H * W:
-                continue
             mask = np.zeros((H, W))
             cv2.drawContours(
                 mask, [contour], -1, (255, 255, 255), thickness=cv2.FILLED
             )
             mask = torch.from_numpy(mask).unsqueeze(0)
-            masks.append(mask)
+            masks_all.append(mask)
+            if cv2.contourArea(contour) >= threshold * H * W:
+                masks.append(mask)
         masks = torch.stack(masks, dim=0).to(device)
+        masks_all = torch.stack(masks_all, dim=0).to(device)
         # Uncomment to debug
         # for i, mask in enumerate(masks):
         #     cv2.imwrite(
         #         f"{self.debug_dir}/mask_{i}.png",
         #         mask.squeeze().cpu().numpy()
         #     )
-        return masks
+        return masks, masks_all
 
     def get_features_in_masks(self, rgbs, masks, flip=False):
         """
@@ -704,13 +709,14 @@ class ChangeDet:
         # )
 
         # Change detection on sparse views
-        masks_changed_sparse = []
+        masks_changed_sparse, masks_changed_sparse_all = [], []
         for ii in range(len(sparse_view_file_ids)): 
-            masks_changed = self.image_diff(
+            masks_changed, masks_changed_all = self.image_diff(
                 rgbs_render_sparse_view[ii:ii+1],
                 rgbs_captured_sparse_view[ii:ii+1]
             )
             masks_changed_sparse.append(masks_changed)
+            masks_changed_sparse_all.append(masks_changed_all)
         # Uncomment to debug
         # masks_changed_tensor = torch.cat(masks_changed_sparse, dim=0)
         # save_masks(
@@ -732,7 +738,7 @@ class ChangeDet:
             ]
             if len(masks_out) > 0:
                 masks_out = torch.cat(masks_out, dim=0)
-                masks_out = split_masks(masks_out)
+                masks_out = split_masks(masks_out, 0.005)
             else:
                 masks_out = torch.empty(0, 1, H, W, device=device)
             masks_move_out_sparse_view.append(masks_out)
@@ -763,12 +769,24 @@ class ChangeDet:
             Ks_sparse_view[no_overlap_ind],
             pcd_filter=configs["pcd_filtering"]
         )
-        print("Number of moved objects: ", len(pcds))
+        print(f"Number of moved objects: {len(pcds)}")
         # Object pose change estimate
+        # Extract features only within changed regions (dilated)
+        feat_masks = [
+            dilate_masks(m.any(dim=0, keepdim=True), 10)
+            for m in masks_changed_sparse_all
+        ]
         feats = self.get_features_in_masks(
-            rgbs_captured_sparse_view, 
-            [m.any(dim=0, keepdim=True) for m in masks_changed_sparse]
+            rgbs_captured_sparse_view,
+            # Try this if pose change est fail for moved objs
+            # [torch.ones(1, 1, H, W).bool().to(device)] * len(rgbs_captured_sparse_view)
+            feat_masks
         )
+        # debug_point_prompts(
+        #     rgbs_captured_sparse_view,
+        #     torch.cat([f[0]["keypoints"] for f in feats], dim=0),
+        #     self.debug_dir
+        # )
         pose_changes = []
         num_sparse_views = len(masks_move_out_sparse_view)
         for ii, pcd_feat in enumerate(pcd_feats):
@@ -855,7 +873,7 @@ class ChangeDet:
         # Get high score mask indices
         high_score_inds = []
         for ss in scores:
-            high_score = [i for i, x in enumerate(ss) if x > configs["sam_threshold"]]
+            high_score = [i for i, x in enumerate(ss) if x > 0.95]
             if len(high_score) > 0:
                 print(f"High score masks: {len(high_score)} / {len(ss)}")
             else:
