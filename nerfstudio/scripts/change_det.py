@@ -896,59 +896,8 @@ class ChangeDet:
         ]
         for inds in high_score_inds:
             print(f"#Views for 3D seg: {len(inds)} / {len(Ks_pretrain_view)}")
-        
-        # # Uncomment to train object-3DGS
-        # obj_ind_to_save = 0
-        # masks_to_save = masks_move_out_pretrain_view[obj_ind_to_save]\
-        #     [high_score_inds[obj_ind_to_save]]
-        # if not os.path.isdir(f"{self.output_dir}/rgb_obj"):
-        #     os.makedirs(f"{self.output_dir}/rgb_obj", exist_ok=True)
-        # good_inds = [
-        #     train_file_ids[pretrain_indices[ii]]
-        #     for ii in high_score_inds[obj_ind_to_save]
-        # ]
-        # rgb_img_list = [
-        #     f"{self.output_dir}/rgb/frame_{ii:05g}.png" for ii in good_inds
-        # ]
-        # mask_img_list = [
-        #     f"{self.debug_dir}/mask_pretrain{ii}.png" for ii in good_inds
-        # ]
-        # save_masks(masks_to_save, mask_img_list)
-        # from nerfstudio.utils.img_utils import rgb2rgba
-        # rgb2rgba(rgb_img_list, mask_img_list, f"{self.output_dir}/rgb_obj/")
-        # pretrain_json = \
-        #     Path(transforms_json).parent / "transforms_pretrain.json"
-        # assert os.path.isfile(pretrain_json), "Pretrain data missing"
-        # pretrain_data = load_from_json(pretrain_json)
-        # obj_data_frames = []
-        # for frame in pretrain_data["frames"]:
-        #     frame_id = extract_last_number(frame["file_path"])
-        #     if frame_id in good_inds:
-        #         frame["file_path"] = f"rgb_obj/frame_{frame_id:05g}.png"
-        #         obj_data_frames.append(frame)
-        # pretrain_data["frames"] = obj_data_frames
-        # write_to_json(
-        #     Path(transforms_json).parent / "transforms_obj.json",
-        #     pretrain_data
-        # )
-        # # train object 3DGS by running the following command
-        # # ns-train splatfacto --pipeline.model.background-color random
 
-        # from nerfstudio.utils.io import save_alpha_transparent_train_data
-        # gt_pose_change=torch.tensor(
-        #     [[1, 0,  0, 2.5 / 11.0], 
-        #     [0,  0, -1, 3.0 / 11.0], 
-        #     [0,  1,  0, 0.5 / 11.0], 
-        #     [0,  0,  0, 1]]
-        # ).to(pose_change)        
-        # save_alpha_transparent_train_data(
-        #     masks, masks_move_in_sparse_view, pose_change, 
-        #     Path(transforms_json).parent, self.output_dir,
-        #     gt_pose_change=gt_pose_change
-        # )
-
-
-        # Compute finer object 3D segmentation
+        # Sec.IV.E: 3D object segmentation
         obj_segs = []
         for ii in range(len(pcds)):
             bbox3d = compute_3D_bbox(pcds[ii])
@@ -972,7 +921,7 @@ class ChangeDet:
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
             obj_segs.append(obj3Dseg)
-        # Global pose refinement
+        # Sec.IV.G: Global pose refinement
         if refine_pose:
             new_cameras = params_to_cameras(
                 cam_poses_sparse_view, Ks_sparse_view, 
