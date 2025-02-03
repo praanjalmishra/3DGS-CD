@@ -298,6 +298,8 @@ class ChangeDet:
         ]
         return pcds, pcd_feats
 
+    # global debug_count
+    # debug_count = 0
     def pretrain_iteration(self, rgbs, masks, cameras, gaussians):
         """
         Forward pass through the transformed pre-trained 3DGS
@@ -1007,45 +1009,17 @@ class ChangeDet:
                 id_int = extract_last_number(path.name)
                 eval_file_ids.append(id_int)
 
-        # Update sparse-view training camera poses
-        finetune_tjson = \
-            Path(transforms_json).parent / "transforms_finetune.json"
-        assert os.path.isfile(finetune_tjson), "Finetuning data missing"
-        finetune_data = load_from_json(finetune_tjson)
-        for ii, frame in enumerate(finetune_data["frames"]):
-            frame_id = extract_last_number(frame["file_path"])
-            if frame_id in sparse_view_file_ids:
-                frame_ind = sparse_view_file_ids.index(frame_id)
-                cam_pose_updated = new_cameras[frame_ind].camera_to_worlds
-                cam_pose_updated = to4x4(cam_pose_updated)
-                finetune_data["frames"][ii]["transform_matrix"] = \
-                    cam_pose_updated.detach().cpu().numpy().tolist()
-            if frame_id in eval_file_ids:
-                frame_ind = eval_file_ids.index(frame_id)
-                cam_pose_updated = cams_eval[frame_ind].camera_to_worlds
-                cam_pose_updated = to4x4(cam_pose_updated)
-                finetune_data["frames"][ii]["transform_matrix"] = \
-                    cam_pose_updated.detach().cpu().numpy().tolist()
-        write_to_json(finetune_tjson, finetune_data)
-
-
-        # Save all-white masks to mask_new folder
-        if not os.path.exists(self.output_dir / "masks_new"):
-            os.makedirs(self.output_dir / "masks_new")
-        mask_files = [
-            self.output_dir / "masks_new" / f"mask_{ii:05g}.png"
-            for ii in sparse_view_file_ids
-        ]
-        save_masks(torch.ones(len(mask_files), 1, H, W), mask_files)
         # Save eval masks
         _, val_files, _, _, _, _ = read_transforms(
             transforms_json, read_images=False, mode="val"
         )
         val_masks_move_out_no_occl = self.occl_aware_mask_proj(
-            cams_eval, obj_segs, new=False
+            cams_eval, obj_segs, new=False,
+            dilate=configs["val_move_out_dilate_3d"]
         )
         val_masks_move_in_no_occl = self.occl_aware_mask_proj(
-            cams_eval, obj_segs, new=True
+            cams_eval, obj_segs, new=True,
+            dilate=configs["val_move_in_dilate_3d"]
         )
         val_file_ids = []
         for ii, path in enumerate(val_files):
@@ -1056,6 +1030,11 @@ class ChangeDet:
             for ii in val_file_ids
         ]
         save_masks(val_masks_move_out_no_occl, mask_files)
+        mask_files = [
+            self.output_dir / "masks_new" / f"mask_new_{ii:05g}.png"
+            for ii in val_file_ids
+        ]
+        save_masks(val_masks_move_in_no_occl, mask_files)
 
 
 if __name__ == "__main__":
