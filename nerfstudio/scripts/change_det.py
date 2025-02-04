@@ -604,8 +604,8 @@ class ChangeDet:
         if configs is None:
             configs = {
                 "mask_refine_sparse_view": 0.0,
-                "pcd_filtering": 0.9,
-                "pre_train_pred_bbox_expand": 0.1,
+                "area_threshold": 0.01,
+                "pcd_filtering": 0.98,
                 "pre_train_refine_bbox_expand": 0.1,
                 "voxel_dim": 400,
                 "bbox3d_expand": 1.8,
@@ -740,7 +740,7 @@ class ChangeDet:
             ]
             if len(masks_out) > 0:
                 masks_out = torch.cat(masks_out, dim=0)
-                masks_out = split_masks(masks_out, 0.005)
+                masks_out = split_masks(masks_out, configs["area_threshold"])
             else:
                 masks_out = torch.empty(0, 1, H, W, device=device)
             masks_move_out_sparse_view.append(masks_out)
@@ -827,10 +827,13 @@ class ChangeDet:
                     num_inliers = num_inlier_i
                     num_matches = num_match_i
                     pose_change = pose_change_i
-            pose_changes.append(pose_change)
-            assert pose_change is not None, "Object pose change est. failed!"
-            print(f"pose_change: \n {pose_change.cpu().numpy()}")
+            if pose_change is None:
+                print(f"Object pose change est. for object {ii} failed!")
+                print(f"Object {ii} is removed from the scene!")
+            else:
+                print(f"pose_change: \n {pose_change.cpu().numpy()}")
             print(f"inlier_ratio: {num_inliers} / {num_matches}")
+            pose_changes.append(pose_change)
         # # Uncomment to debug
         # debug_point_cloud(pcds[0], self.debug_dir)
 
@@ -913,8 +916,13 @@ class ChangeDet:
                 masks_move_out_pretrain_view[ii][high_score_inds[ii]],
                 cutoff=configs["proj_check_cutoff"]
             )
+            if pose_changes[ii] == None:
+                # Set dummy pose for removed object
+                pose_change_ii = torch.eye(4, device=device)
+            else:
+                pose_change_ii = pose_changes[ii]
             obj3Dseg = Object3DSeg(
-                *expanded_bbox3d, occ_grid, pose_changes[ii], bbox3d,
+                *expanded_bbox3d, occ_grid, pose_change_ii, bbox3d,
                 configs["mask3d_dilate_uniform"],
                 configs["mask3d_dilate_top"]
             )
