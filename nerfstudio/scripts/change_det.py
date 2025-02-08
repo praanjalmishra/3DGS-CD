@@ -23,7 +23,8 @@ from nerfstudio.utils.debug_utils import (
 )
 from nerfstudio.utils.effsam_utils import (
     effsam_predict, effsam_embedding, effsam_refine_masks,
-    effsam_batch_predict, compute_2D_bbox, expand_2D_bbox
+    effsam_batch_predict, compute_2D_bbox, expand_2D_bbox,
+    get_effsam_embedding_in_masks
 )
 from nerfstudio.utils.eval_utils import eval_setup
 from nerfstudio.utils.gauss_utils import transform_gaussians
@@ -207,9 +208,13 @@ class ChangeDet:
             feats_all.append(feat_i)
         return feats_all
 
-    def match_move_out(self, rgbs, depths, masks, poses, Ks, pcd_filter=0.9):
+    def match_move_out(
+        self, rgbs, depths, masks, poses, Ks, pcd_filter=0.9, embed_sim_thresh=0.4
+    ):
         """
-        Match move-out masks across multiple images
+        Associate and fuse 2D move-out masks across post-change views
+        to obtain obj templates
+        NOTE: This is only for moved or removed objects
 
         Args:
             rgbs (Nx3xHxW): RGB images
@@ -240,8 +245,10 @@ class ChangeDet:
             return pts_at_kps
         # Extract SuperPoint descriptors in multi-view masked RGB images
         feats = self.get_features_in_masks(rgbs, masks)
+        # Extract EfficientSAM embeddings for objects across multi-view images
+        embeds = get_effsam_embedding_in_masks(rgbs, masks)
         # Initialize object pcds
-        pcds, pcd_sizes, pcd_counts, pcd_feats = [], [], [], []
+        pcds, pcd_sizes, pcd_counts, pcd_feats, pcd_embeds = [], [], [], [], []
         for j in range(len(masks[0])):
             pcd = compute_point_cloud(
                 depths[0:1], poses[0:1], Ks[0:1], masks[0][j:j+1]
@@ -255,6 +262,7 @@ class ChangeDet:
                 feats[0][j], depths[0:1], poses[0], Ks[0]
             )
             pcd_feats.append(Obj3DFeats([feats[0][j]], [pts3D]))
+            pcd_embeds.append(embeds[0][j:j+1, :])
         # Associate move-out masks with the object point clouds w/ NN matching
         for i in range(1, N):
             dist_mat = torch.tensor(pcd_sizes).reshape(-1, 1).to(device)
@@ -273,14 +281,31 @@ class ChangeDet:
             # print(f"row_ind: {row_ind}, col_ind: {col_ind}")
             # Update existing object point clouds
             for r, c in zip(row_ind, col_ind):
+                # check feature sim btw matched object segments
+                embed_sim = torch.cosine_similarity(
+                    pcd_embeds[r], embeds[i][c], dim=-1
+                )
                 if c < len(masks[i]):
-                    pcds[r] = torch.cat((pcds[r], new_pcds[c]), dim=0)
-                    pcd_sizes[r] = pcd_size(pcds[r])
-                    pcd_counts[r] += 1
-                    pts3D = compute_feats_3D(
-                        feats[i][c], depths[i:i+1], poses[i], Ks[i]
-                    )
-                    pcd_feats[r].add_feats(feats[i][c], pts3D)
+                    if embed_sim.max() > embed_sim_thresh:
+                        pcds[r] = torch.cat((pcds[r], new_pcds[c]), dim=0)
+                        pcd_sizes[r] = pcd_size(pcds[r])
+                        pcd_counts[r] += 1
+                        pts3D = compute_feats_3D(
+                            feats[i][c], depths[i:i+1], poses[i], Ks[i]
+                        )
+                        pcd_feats[r].add_feats(feats[i][c], pts3D)
+                        pcd_embeds[r] = torch.cat(
+                            (pcd_embeds[r], embeds[i][c:c+1]), dim=0
+                        )
+                    else:
+                        pcds.append(new_pcds[c])
+                        pcd_sizes.append(pcd_size(new_pcds[c]))
+                        pcd_counts.append(1)
+                        pts3D = compute_feats_3D(
+                            feats[i][c], depths[i:i+1], poses[i], Ks[i]
+                        )
+                        pcd_feats.append(Obj3DFeats([feats[i][c]], [pts3D]))
+                        pcd_embeds.append(embeds[i][c:c+1, :])
             # Add new object point clouds
             for k in range(len(masks[i])):
                 if k not in col_ind:
@@ -291,6 +316,7 @@ class ChangeDet:
                         feats[i][k], depths[i:i+1], poses[i], Ks[i]
                     )
                     pcd_feats.append(Obj3DFeats([feats[i][k]], [pts3D]))
+                    pcd_embeds.append(embeds[i][k:k+1, :])
         # Filter out object point clouds that appear in <25% of images
         pcds = [p for p, ct in zip(pcds, pcd_counts) if ct > N * 0.25]
         pcd_feats = [
