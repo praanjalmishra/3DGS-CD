@@ -574,8 +574,10 @@ class ChangeDet:
                     vis_ii.append(jj)
             vis.append(vis_ii)
         return vis
-    
-    def occl_aware_mask_proj(self, cams, obj_segs, dilate=0.15, new=False):
+
+    def mask_proj(
+        self, cams, obj_segs, dilate=0.15, new=False, occlusion_check=True
+    ):
         """
         Project object 3D segmentation to target cameras w/ occlusion-awareness
         
@@ -583,10 +585,12 @@ class ChangeDet:
         obj_segs (M-list of Obj3DSeg): Object 3D segments
         dilate (float): Dilate the 3D segments to check if points in mask
         new (bool): Use object's new pose for mask projection
+        occlusion_check (bool or bool-list): Do we check occlusion?
 
         Returns:
             masks (Nx1xHxW): 2D move-out or -in masks on the target views
         """
+        assert occlusion_check is bool or len(occlusion_check) == len(obj_segs)
         # Render depths at target cameras
         poses, Ks, dist, H, W = cameras_to_params(cams)
         if not new:
@@ -627,11 +631,14 @@ class ChangeDet:
         # debug_depths(depths, self.debug_dir)
         # Project object 3D segmentation to target
         masks_no_occl_all_obj = []
-        for obj_seg in obj_segs:
+        for obj_ind, obj_seg in enumerate(obj_segs):
             if not new:
                 masks = obj_seg.project(poses, Ks, dist, H, W)
             else:
                 masks = obj_seg.project_new(poses, Ks, dist, H, W)
+            if not occlusion_check or not occlusion_check[obj_ind]:
+                masks_no_occl_all_obj.append(masks)
+                continue
             # dilate the 3D segments due to noise
             voxel_dilated = obj_seg.dilate_uniform(
                 int(obj_seg.voxel.size(0) * dilate)
@@ -1043,13 +1050,9 @@ class ChangeDet:
         _, val_files, _, _, _, _ = read_transforms(
             transforms_json, read_images=False, mode="val"
         )
-        val_masks_move_out_no_occl = self.occl_aware_mask_proj(
-            cams_eval, obj_segs, new=False,
-            dilate=configs["val_move_out_dilate_3d"]
+        val_masks_move_out_no_occl = self.mask_proj(
         )
-        val_masks_move_in_no_occl = self.occl_aware_mask_proj(
-            cams_eval, obj_segs, new=True,
-            dilate=configs["val_move_in_dilate_3d"]
+        val_masks_move_in_no_occl = self.mask_proj(
         )
         val_file_ids = []
         for ii, path in enumerate(val_files):
