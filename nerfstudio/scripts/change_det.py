@@ -323,6 +323,53 @@ class ChangeDet:
             e for e, ct in zip(pcd_feats, pcd_counts) if ct > N * 0.25
         ]
         return pcds, pcd_feats
+    
+    def match_move_in(self, rgbs, masks):
+        """
+        Associate and fuse move-in masks across post-change views
+        to obtain per-object move-in masks
+        NOTE: This is only for inserted objects
+
+        Args:
+            rgbs (Nx3xHxW): RGB images
+            masks (N-list of Mx1xHxW): Sampling masks
+
+        Returns:
+            masks_move_in (K-list of Lx1xHxW): Per-object move-in across views
+            view_indices (K-list of L): view indices of the move-in masks
+        """
+        assert rgbs.shape[1] == 3
+        assert len(rgbs) == len(masks)
+        # Extract EffSAM embeddings for objects across multi-view images
+        embeds = get_effsam_embedding_in_masks(rgbs, masks)
+        # Initialize move-in masks
+        obj_masks_move_in = [masks[0][i:i+1] for i in range(len(masks[0]))]
+        view_indices = [[0] for _ in range(len(masks[0]))]
+        for ii, (masks_i, embeds_i) in enumerate(zip(masks[1:], embeds[1:])):
+            if embeds_i.size(0) == 0:
+                continue
+            sim_mat = torch.cosine_similarity(
+                embeds[0][:,None,:], embeds_i[None,:,:], dim=-1
+            )
+            row_ind, col_ind = linear_sum_assignment(-sim_mat.cpu().numpy())
+            # Update existing objects
+            for r, c in zip(row_ind, col_ind):
+                if c < len(masks_i):
+                    obj_masks_move_in[r] = torch.cat(
+                        (obj_masks_move_in[r], masks_i[c:c+1]), dim=0
+                    )
+                    view_indices[r].append(ii+1)
+            # Add new objects
+            for k in range(len(masks_i)):
+                if k not in col_ind:
+                    obj_masks_move_in.append(masks_i[k:k+1])
+                    view_indices.append([ii+1])
+        # Filter out move-in masks that appear in <25% of images
+        obj_masks_move_in = [
+            m for m in obj_masks_move_in if m.size(0) > len(rgbs) * 0.25
+        ]
+        view_indices = [i for i in view_indices if len(i) > len(rgbs) * 0.25]
+        return obj_masks_move_in, view_indices
 
     # global debug_count
     # debug_count = 0
