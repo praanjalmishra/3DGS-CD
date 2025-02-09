@@ -711,7 +711,7 @@ class ChangeDet:
 
     def main(
         self, transforms_json=None, configs=None, checkpoint_dir=None,
-        refine_pose=True
+        refine_pose=True, debug=False
     ):
         """
         Estimate moved objects' 3D masks and pose changes
@@ -800,10 +800,11 @@ class ChangeDet:
         rgbs_render_sparse_view, depths_sparse_view = render_cameras(
             self.pipeline_pretrain, cameras_sparse_view, device=device
         )
-        # # Uncomment to debug
-        # debug_image_pairs(
-        #     rgbs_render_sparse_view, rgbs_captured_sparse_view, self.debug_dir
-        # )
+        if debug:
+            debug_image_pairs(
+                rgbs_render_sparse_view, rgbs_captured_sparse_view,
+                self.debug_dir
+            )
 
         # Sec.IV.C: 2D Change detection on post-change views
         masks_changed_sparse, masks_changed_sparse_all = [], []
@@ -814,14 +815,14 @@ class ChangeDet:
             )
             masks_changed_sparse.append(masks_changed)
             masks_changed_sparse_all.append(masks_changed_all)
-        # Uncomment to debug
-        # masks_changed_tensor = torch.cat(masks_changed_sparse, dim=0)
-        # save_masks(
-        #     masks_changed_tensor / 255.0, [
-        #         f"{self.debug_dir}/masks_changed{i}.png"
-        #         for i in range(len(masks_changed_tensor))
-        #     ]
-        # )
+        if debug:
+            masks_changed_tensor = torch.cat(masks_changed_sparse, dim=0)
+            save_masks(
+                masks_changed_tensor / 255.0, [
+                    f"{self.debug_dir}/masks_changed{i}.png"
+                    for i in range(len(masks_changed_tensor))
+                ]
+            )
         masks_move_out_sparse_view = []
         for ii, masks_changed in enumerate(masks_changed_sparse):
             masks_render, scores_render = effsam_refine_masks(
@@ -846,17 +847,12 @@ class ChangeDet:
         for i in range(len(masks_move_out_sparse_view)):
             if masks_move_out_sparse_view[i].size(0) >= num_move_out:
                 no_overlap_ind.append(i)
-        # # Uncomment to debug
-        # masks_to_save = torch.cat(masks_move_in_sparse_view, dim=0)
-        # save_masks(masks_to_save, [
-        #     f"{self.debug_dir}/masks_move_in{i}.png" 
-        #     for i in range(len(masks_to_save))
-        # ])
-        # masks_to_save = torch.cat(masks_move_out_sparse_view, dim=0)
-        # save_masks(masks_to_save, [
-        #     f"{self.debug_dir}/masks_move_out{i}.png"
-        #     for i in range(len(masks_to_save))
-        # ])
+        if debug:
+            masks_to_save = torch.cat(masks_move_out_sparse_view, dim=0)
+            save_masks(masks_to_save, [
+                f"{self.debug_dir}/masks_move_out{i}.png"
+                for i in range(len(masks_to_save))
+            ])
 
         # Sec.IV.D: Change-aware object association across post-change views
         # Multi-view move-out mask association to get obj templates
@@ -928,8 +924,7 @@ class ChangeDet:
             rgbs_captured_sparse_view, feat_masks
         )
         # debug_point_prompts(
-        #     rgbs_captured_sparse_view,
-        #     torch.cat([f[0]["keypoints"] for f in feats], dim=0),
+        #     rgbs_captured_sparse_view[0:1], feats[0][0]["keypoints"],
         #     self.debug_dir
         # )
         pose_changes = []
@@ -941,19 +936,19 @@ class ChangeDet:
                 pose_change_i, num_inlier_i, num_match_i = pcd_feat.PnP(
                     feats[idx][0], Ks_sparse_view[idx], H, W, self.matcher
                 )
-                # # Uncomment to debug
-                # m2d, m3d = pcd_feat.match(feats[idx][0], self.matcher)
-                # m3d_proj, _ = project_points(
-                #     m3d, cam_poses_sparse_view[0:1], Ks_sparse_view[0:1],
-                #     dist_params_sparse_view[0:1], H, W
-                # )
-                # debug_matches(
-                #     rgbs_render_sparse_view[0:1], 
-                #     rgbs_captured_sparse_view[idx:idx+1],
-                #     m3d_proj[:, :, :], [m2d[:, :]],
-                #     torch.arange(m2d.shape[0])[None, :, None].repeat(1, 1, 2),
-                #     self.debug_dir
-                # )
+                if debug:
+                    m2d, m3d = pcd_feat.match(feats[idx][0], self.matcher)
+                    m3d_proj, _ = project_points(
+                        m3d, cam_poses_sparse_view[0:1], Ks_sparse_view[0:1],
+                        dist_params_sparse_view[0:1], H, W
+                    )
+                    debug_matches(
+                        rgbs_render_sparse_view[0:1], 
+                        rgbs_captured_sparse_view[idx:idx+1],
+                        m3d_proj[:, :, :], [m2d[:, :]],
+                        torch.arange(m2d.shape[0])[None, :, None].repeat(1, 1, 2),
+                        self.debug_dir
+                    )
                 if pose_change_i is None:
                     continue
                 # Equation in the paper
@@ -977,8 +972,8 @@ class ChangeDet:
                 print(f"pose_change: \n {pose_change.cpu().numpy()}")
             print(f"inlier_ratio: {num_inliers} / {num_matches}")
             pose_changes.append(pose_change)
-        # # Uncomment to debug
-        # debug_point_cloud(pcds[-1], self.debug_dir)
+        if debug:
+            debug_point_cloud(pcds[-1], self.debug_dir)
         num_moved = len([_ for pc in pose_changes if pc is not None])
         print(f"# Moved objects: {num_moved}")
         print(f"# Removed objects: {len(pose_changes) - num_moved}")
@@ -996,9 +991,10 @@ class ChangeDet:
                 )
                 if not is_point_in_img.all():
                     print("WARN: Some points are out of the pre-change images")
-                # debug_point_prompts(
-                #     color_images_pretrain_view, pcd_proj, self.debug_dir
-                # )
+                if debug:
+                    debug_point_prompts(
+                        color_images_pretrain_view, pcd_proj, self.debug_dir
+                    )
                 bbox2d = compute_2D_bbox(pcd_proj)
                 # Slightly expand 2D bboxes to improve SAM predictions
                 bbox2d = expand_2D_bbox(
@@ -1021,8 +1017,10 @@ class ChangeDet:
                 masks_move_out_pretrain_view, dim=1
             ) # MxNx1xHxW
             scores = [list(t) for t in zip(*scores)] # M-list of N-list
-            # # Uncomment to debug
-            # debug_masks(masks_move_out_pretrain_view[0, ...], self.debug_dir)
+            if debug:
+                debug_masks(
+                    masks_move_out_pretrain_view[0, ...], self.debug_dir
+                )
 
             # Get high score mask indices
             high_score_inds = []
@@ -1072,8 +1070,8 @@ class ChangeDet:
                 *expanded_bbox3d, occ_grid, pose_changes[ii], bbox3d,
                 configs["mask3d_dilate_uniform"], configs["mask3d_dilate_top"]
             )
-            # # Uncomment to debug
-            # obj3Dseg.visualize(self.debug_dir)
+            if debug:
+                obj3Dseg.visualize(self.debug_dir)
             obj_segs.append(obj3Dseg)
         # For inserted objects
         obj_segs_inserted = []
@@ -1099,8 +1097,8 @@ class ChangeDet:
                 *bbox3d, occ_grid, torch.eye(4, device=device), # dummy
                 bbox3d, 0, 0
             )
-            # # Uncomment to debug
-            # obj3Dseg.visualize(self.debug_dir)
+            if debug:
+                obj3Dseg.visualize(self.debug_dir)
             obj_segs_inserted.append(obj3Dseg)
 
         # Sec.IV.G: Global pose refinement
@@ -1191,6 +1189,10 @@ if __name__ == "__main__":
         "--ckpt", "-ckpt", type=str, default=None,
         help="Path to the parent folder of 3DGS checkpoint"
     )
+    parser.add_argument(
+        "--debug", "-d", action="store_true",
+        help="Debug mode"
+    )
     args = parser.parse_args()
 
     # Load hyperparams
@@ -1200,5 +1202,5 @@ if __name__ == "__main__":
     change_det = ChangeDet(Path(args.config), Path(args.output))
     change_det.main(
         transforms_json=args.transform, configs=hyperparams,
-        checkpoint_dir=Path(args.ckpt)
+        checkpoint_dir=Path(args.ckpt), debug=args.debug
     )

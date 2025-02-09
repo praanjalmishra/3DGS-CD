@@ -31,7 +31,7 @@ def debug_point_prompts(images, points, debug_dir):
         )
         plt.title(f"Target View {i}")
         plt.axis("off")
-        plt.savefig(f"{debug_dir}/debug_{i}.png")
+        plt.savefig(f"{debug_dir}/debug_points_{i}.png")
         plt.close()
 
 
@@ -58,7 +58,7 @@ def debug_bbox_prompts(images, bboxes, debug_dir):
         plt.gca().add_patch(rect)
         plt.title(f"Target View {i}")
         plt.axis("off")
-        plt.savefig(f"{debug_dir}/debug_{i}.png")
+        plt.savefig(f"{debug_dir}/debug_bbox_{i}.png")
         plt.close()
 
 
@@ -94,7 +94,7 @@ def debug_matches(imgs1, imgs2, kps1, kps2, matches, debug_dir):
         mkp1, mkp2 = kp1[match[..., 0]], kp2[match[..., 1]]
         viz2d.plot_images([img1.cpu(), img2.cpu()])
         viz2d.plot_matches(mkp1, mkp2, color="lime", lw=0.2)
-        viz2d.save_plot(f"{debug_dir}/debug_{i}.png")
+        viz2d.save_plot(f"{debug_dir}/debug_matches_{i}.png")
         plt.close()
 
 
@@ -107,7 +107,7 @@ def debug_image_pairs(imgs1, imgs2, debug_dir):
     assert os.path.isdir(debug_dir)
     for idx, (img1, img2) in enumerate(zip(imgs1, imgs2)):
         viz2d.plot_images([img1.cpu(), img2.cpu()])
-        viz2d.save_plot(f"{debug_dir}/debug_{idx}.png")
+        viz2d.save_plot(f"{debug_dir}/debug_imgpairs_{idx}.png")
         plt.close()
 
 
