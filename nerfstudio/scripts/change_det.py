@@ -710,7 +710,8 @@ class ChangeDet:
         return masks_no_occl_union
 
     def main(
-        self, transforms_json=None, configs=None, refine_pose=True
+        self, transforms_json=None, configs=None, checkpoint_dir=None,
+        refine_pose=True
     ):
         """
         Estimate moved objects' 3D masks and pose changes
@@ -755,7 +756,8 @@ class ChangeDet:
         # Load pre-trained 3DGS
         assert os.path.isfile(self.load_config)
         _, self.pipeline_pretrain, _, _ = eval_setup(
-            self.load_config, test_mode="inference"
+            self.load_config, test_mode="inference",
+            checkpoint_dir=checkpoint_dir
         )
 
         device = self.device
@@ -1185,6 +1187,10 @@ if __name__ == "__main__":
         "--transform", "-t", type=str,
         help="Path to transforms.json with info on both old and new images"
     )
+    parser.add_argument(
+        "--ckpt", "-ckpt", type=str, default=None,
+        help="Path to the parent folder of 3DGS checkpoint"
+    )
     args = parser.parse_args()
 
     # Load hyperparams
@@ -1193,5 +1199,6 @@ if __name__ == "__main__":
     # Detect changes
     change_det = ChangeDet(Path(args.config), Path(args.output))
     change_det.main(
-        transforms_json=args.transform, configs=hyperparams
+        transforms_json=args.transform, configs=hyperparams,
+        checkpoint_dir=Path(args.ckpt)
     )
