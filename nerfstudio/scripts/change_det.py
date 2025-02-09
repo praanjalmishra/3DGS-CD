@@ -575,17 +575,58 @@ class ChangeDet:
             vis.append(vis_ii)
         return vis
 
+    def masks_to_bbox3d(
+        self, masks, poses, Ks, dist_params, gauss_filter_percent=0.5,
+        obj_pts_filter_percent=0.8, num_sample=1000000, proj_check_cutoff=0.99
+    ):
+        """
+        Obj masks on multi views to rough object bbox3D
+        for finer obj segmentation of *inserted* objects
+
+        Args:
+            masks (Nx1xHxW): Object move-out masks on the sparse views
+            poses (Nx4x4): Camera poses wrt world
+            Ks (Nx3x3): Camera intrinsics
+            dist_params (Nx4): Camera distortion parameters
+
+        Returns:
+            bbox3d (2-tuple of 3-tuple of floats): MinMax xyz of the obj bbox3D
+        """
+        # Get the 3D bbox of all Gaussians in the 3DGS model
+        gauss_means = self.pipeline_pretrain.model.gauss_params.means
+        gauss_means = point_cloud_filtering(gauss_means, gauss_filter_percent)
+        device = gauss_means.device
+        min_xyz = gauss_means.min(dim=0)[0]
+        max_xyz = gauss_means.max(dim=0)[0]
+        # Sample points in the 3D bbox
+        pts_sampled = torch.rand(num_sample, 3, device=device) * \
+            (max_xyz - min_xyz) + min_xyz
+        occupied = proj_check_3D_points(
+            pts_sampled, poses, Ks, dist_params, masks,
+            cutoff=proj_check_cutoff
+        )
+        pts_occupy = pts_sampled[occupied]
+        pts_occupy = point_cloud_filtering(
+            pts_occupy, obj_pts_filter_percent
+        )
+        bbox3d = (
+            pts_occupy.min(dim=0)[0].detach().cpu().numpy(),
+            pts_occupy.max(dim=0)[0].detach().cpu().numpy()
+        )
+        return bbox3d
+
     def mask_proj(
         self, cams, obj_segs, dilate=0.15, new=False, occlusion_check=True
     ):
         """
         Project object 3D segmentation to target cameras w/ occlusion-awareness
         
-        cams (Cameras): Target camera views
-        obj_segs (M-list of Obj3DSeg): Object 3D segments
-        dilate (float): Dilate the 3D segments to check if points in mask
-        new (bool): Use object's new pose for mask projection
-        occlusion_check (bool or bool-list): Do we check occlusion?
+        Args:
+            cams (Cameras): Target camera views
+            obj_segs (M-list of Obj3DSeg): Object 3D segments
+            dilate (float): Dilate the 3D segments to check if points in mask
+            new (bool): Use object's new pose for mask projection
+            occlusion_check (bool or bool-list): Do we check occlusion?
 
         Returns:
             masks (Nx1xHxW): 2D move-out or -in masks on the target views
@@ -1062,23 +1103,9 @@ class ChangeDet:
             zip(obj_masks_move_in, obj_move_in_view_indices)
         ):
             # 1st pass proj_check for sampled 3D pts to get a rough 3D bbox
-            gauss_means = self.pipeline_pretrain.model.gauss_params.means
-            gauss_means = point_cloud_filtering(gauss_means, 0.5)
-            min_xyz = gauss_means.min(dim=0)[0]
-            max_xyz = gauss_means.max(dim=0)[0]
-            pts_sampled = torch.rand(1000000, 3, device=device) * \
-                (max_xyz - min_xyz) + min_xyz
-            pts_sampled = point_cloud_filtering(pts_sampled, 0.3)
-            occupied = proj_check_3D_points(
-                pts_sampled, cam_poses_sparse_view[obj_in_ind],
-                Ks_sparse_view[obj_in_ind],
-                dist_params_sparse_view[obj_in_ind],
-                obj_mask_move_in, cutoff=0.99
-            )
-            pts_occupy = pts_sampled[occupied]
-            bbox3d = (
-                pts_occupy.min(dim=0)[0].detach().cpu().numpy(),
-                pts_occupy.max(dim=0)[0].detach().cpu().numpy()
+            bbox3d = self.masks_to_bbox3d(
+                obj_mask_move_in, cam_poses_sparse_view[obj_in_ind],
+                Ks_sparse_view[obj_in_ind], dist_params_sparse_view[obj_in_ind]
             )
             bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
             print(f"bbox3d: {bbox3d}")            
