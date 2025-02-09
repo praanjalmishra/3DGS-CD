@@ -134,8 +134,24 @@ Use your camera (tested with iPhone-13 mini camera) to capture >150 images for y
 ### Parameter tuning
 If the data is not captured carefully, our method can be sensitive to hyperparameters. Below are the key parameters we recommend tuning first:
 
+```
+mask_refine_sparse_view
+  - Expand EfficientSAM box prompt for 2D change detection
+  - 0.0 should be a good starting point
+  - Increase if 2D change detection fails
+pre_train_pred_bbox_expand
+  - Expand EfficientSAM box prompt for 2D segmentation on the pre-change view (for removed/moved objects)
+  - 0.05 should be a good starting point
+  - Increase if 2D segmentation fails
+proj_check_cutoff
+  - Cutoff for multi-view mask fusion
+  - 0.9 should be a good starting point
+  - Increase if unwanted parts are included in the 3D segmentation volume.
+  - Decrease if missing parts in the 3D segmentation volume
+```
+
 ### Bug!
-It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please submit a PR or open an issue to let us know.
+It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please [submit a PR](https://github.com/520xyxyzq/3DGS-CD/pulls) or open an issue to let us know.
 </details>
 
 ## Future Directions and Ideas
