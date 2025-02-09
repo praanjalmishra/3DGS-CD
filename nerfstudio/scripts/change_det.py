@@ -405,6 +405,8 @@ class ChangeDet:
             )
             loss = sum(loss_dict.values())
             loss_accumulated += loss
+        # global debug_count
+        # debug_count += 1
         # Uncomment to vis the pose regression process
         # blend = rgbs[-1] * 0.2 + outputs["rgb"] * masks[-1] * 0.8
         # blend = (blend.detach().cpu().numpy() * 255).astype(np.uint8)
@@ -1153,7 +1155,7 @@ class ChangeDet:
         for ii, path in enumerate(val_files):
             id_int = extract_last_number(path.name)
             val_file_ids.append(id_int)
-        # Save masks
+        # Save eval masks
         mask_output_dir = self.output_dir / "masks_new"
         os.makedirs(mask_output_dir, exist_ok=True)
         mask_files = [
