@@ -164,7 +164,7 @@ def effsam_batch_predict(rgb, bboxes):
 def effsam_embedding(rgb, upsample=True):
     """
     Get pixel-aligned image embeddings
-    @param rgb (HxWx3 np.array or 1x1xHxW tensor): Image
+    @param rgb (HxWx3 np.array or 1x3xHxW tensor): Image
     @param upsample (bool): Whether to upsample the features
     @return features (1xCxHxW tensor): Pixel-aligned image embeddings
     """
@@ -181,6 +181,36 @@ def effsam_embedding(rgb, upsample=True):
             features, rgb.shape[-2:], mode="bilinear", align_corners=False
         )
     return features
+
+
+def get_effsam_embedding_in_masks(rgbs, masks):
+    """
+    Get pixel-aligned image embeddings in masks
+    @param rgbs (Nx3xHxW): RGB images
+    @param masks (N-list of Mx1xHxW): 2D object masks
+    @return features (N-list of MxK): Per-view per-object embedding vectors
+    """
+    from nerfstudio.utils.img_utils import median_high_dim
+    assert rgbs.shape[1] == 3
+    device = rgbs.device
+    embeddings = []
+    for rgb, mask in zip(rgbs, masks):
+        embedding = effsam_embedding(rgb[None], upsample=False)
+        if len(mask) == 0:
+            embeddings.append(torch.zeros(0, embedding.shape[1]).to(device))
+            continue
+        assert mask.shape[1] == 1
+        mask = torch.nn.functional.interpolate(
+            mask.float(), embedding.shape[-2:], mode="nearest"
+        ).bool()
+        embed_vecs = []
+        for m in mask:
+            embedding_map = embedding[0, :, m.squeeze()].permute(1, 0)
+            embedding_vec = median_high_dim(embedding_map)
+            embed_vecs.append(embedding_vec)
+        embed_vecs = torch.stack(embed_vecs, dim=0)
+        embeddings.append(embed_vecs)
+    return embeddings
 
 
 def effsam_refine_masks(rgb, masks, expand=0.1):
