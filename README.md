@@ -10,8 +10,11 @@ TLDR: We estimate **3D object-level changes** from two sets of unaligned RGB ima
 [![Watch the video](https://via.placeholder.com/100)](https://github.com/user-attachments/assets/ef073079-6bed-4a06-8f0e-4e765a5fd680)
 
 ## Data
+
+
 <details>
   <summary>Click to expand</summary>
+<p>&nbsp;</p>
 
 The **3DGS-CD dataset** can be found [here](https://drive.google.com/drive/folders/1OPUu643bkbAoryASNMi8_iDJGnypotc0?usp=drive_link).
 All the RGB images have been pre-processed (i.e. downscaled and undistorted).
@@ -115,7 +118,10 @@ python nerfstudio/scripts/change_det.py \
 ### Run on custom data
 
 #### 1. Data capture:
-Use your phone (tested with iPhone-13 mini) to capture >150 images for your scene, make object-level changes and capture another ~10 images of the changed state of the scene.
+
+Use your camera (tested with iPhone-13 mini camera) to capture >150 images for your scene, make object-level changes and capture another 4~10 images of the changed state of the scene.
+
+
 
 #### 2. Data Processing
 #### 3. Run our method
@@ -129,12 +135,14 @@ Use your phone (tested with iPhone-13 mini) to capture >150 images for your scen
 If the data is not captured carefully, our method can be sensitive to hyperparameters. Below are the key parameters we recommend tuning first:
 
 ### Bug!
-It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please open an issue to let us know.
+It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please submit a PR or open an issue to let us know.
 </details>
 
 ## Future Directions and Ideas
 <details>
   <summary>Click to expand</summary>
+
+<p>&nbsp;</p>
 
 We’re excited about the future directions this work inspires and enables! Below, we highlight some promising research opportunities. If you're interested in exploring any of these, feel free to reach out—we’d love to chat!
 
@@ -143,9 +151,15 @@ Can we detect 3D changes with just 4 pre-change images and 4 post-change images?
 
 ### 3DGS-CD enables robot workspace reset
 
-### Update-able radiance field models to 3D scene changes
+Wouldn’t it be cool if your robot could automatically reset your tabletop every time you make a mess? Check out the simple simulated demo in Section V.B of our paper!
+
+### Fast radiance field model update to reflect 3D changes
+
+No need to recapture data and wait 30 minutes to retrain a radiance field model just because something moved in the scene. Let’s update it based on the estimated changes! Check out the [NeRF-Update](https://arxiv.org/pdf/2403.11024) paper and Section V.C of our paper.
 
 ### Non-rigid 3DGS-CD
+
+Let's estimate non-rigid object transformations!
 
 </details>
 
