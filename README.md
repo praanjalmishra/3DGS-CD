@@ -23,6 +23,66 @@ scene_name
   -masks_gt: Ground truth change masks for evaluation images
 ```
 
+## Installation
+
+### 1. Install nerfstudio dependencies
+
+#### 1.0 Create conda environment
+
+```bash
+conda create --name gscd -y python=3.8
+conda activate gscd
+pip install --upgrade pip
+```
+
+#### 1.1 Install CUDA dependencies
+
+Install PyTorch with CUDA and [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn).
+`cuda-toolkit` is required for building `tiny-cuda-nn`.
+
+For CUDA 11.8:
+
+```bash
+pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+
+conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+```
+
+See [Dependencies](https://github.com/nerfstudio-project/nerfstudio/blob/main/docs/quickstart/installation.md#dependencies)
+in the Installation documentation for more.
+
+#### 1.2 Install nerfstudio dependencies
+
+```
+git clone https://github.com/520xyxyzq/3DGS-CD.git 3dgscd
+cd 3dgscd
+pip install --upgrade pip setuptools
+pip install -e .
+```
+
+### 2. Install 3DGS-CD dependencies
+
+#### 2.1 Install EfficientSAM
+
+Follow EfficientSAM [instructions](https://github.com/yformer/EfficientSAM)
+
+**OR** if you prefer pip install:
+
+```bash
+pip install git+https://github.com/yformer/EfficientSAM.git@c9408a74b1db85e7831977c66e9462c6f4891729
+```
+Download the EfficientSAM model weight from [here](https://github.com/yformer/EfficientSAM/blob/main/weights/efficient_sam_vits.pt.zip) and change line 21 of [this file](https://github.com/yformer/EfficientSAM/blob/main/efficient_sam/build_efficient_sam.py) in your python lib to point to the downloaded weight. 
+
+#### 2.2 Install HLoc
+
+```bash
+pip install git+https://github.com/cvg/Hierarchical-Localization.git@73a3cb0f59659306eb6c15c7213137b2196c5ceb
+```
+
+
+## Instructions
+
 ### Run on our data
 
 ```
