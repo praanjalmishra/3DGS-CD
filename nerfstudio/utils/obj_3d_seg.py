@@ -33,7 +33,7 @@ class Object3DSeg:
         """
         assert voxel.dtype == torch.bool
         assert all([min_ < max_ for min_, max_ in zip(bbox_min, bbox_max)])
-        assert pose_change.shape == (4, 4)
+        assert pose_change == None or pose_change.shape == (4, 4)
         self.bbox_min = torch.tensor(bbox_min).to(voxel.device).float()
         self.bbox_max = torch.tensor(bbox_max).to(voxel.device).float()
         self.dims = self.bbox_max - self.bbox_min
@@ -70,6 +70,8 @@ class Object3DSeg:
         """
         Get the 6DoF pose change of the object
         """
+        if self.pose_change is None:
+            return torch.eye(4, device=self.voxel.device)
         return self.pose_change
     
     def set_pose_change(self, pose_change):
@@ -79,7 +81,10 @@ class Object3DSeg:
         Args:
             pose_change (4x4 tensor): 6DoF pose change
         """
-        self.pose_change = pose_change
+        if self.pose_change is None:
+            self.pose_change = None
+        else:
+            self.pose_change = pose_change
 
     def get_all_corners(self):
         """
@@ -252,7 +257,10 @@ class Object3DSeg:
         """
         assert points.shape[-1] == 3
         # Transform points back to object's old 3D mask
-        pose_change_inv = torch.inverse(self.pose_change)
+        if self.pose_change is None:
+            pose_change_inv = torch.eye(4, device=points.device)
+        else:
+            pose_change_inv = torch.inverse(self.pose_change)
         points_trans = torch.einsum(
             "ij,...j->...i", pose_change_inv[:3, :3], points
         ) + pose_change_inv[:3, 3]
@@ -318,8 +326,12 @@ class Object3DSeg:
             masks (Nx1xHxW tensor): Projected 2D masks
         """
         obj_pts = self.get_obj_coords()
+        if self.pose_change is None:
+            pose_change = torch.eye(4, device=poses.device)
+        else:
+            pose_change = self.pose_change
         obj_pts_moved = (
-            self.pose_change[:3, :3] @ obj_pts.T + self.pose_change[:3, 3:]
+            pose_change[:3, :3] @ obj_pts.T + pose_change[:3, 3:]
         ).T.reshape(-1, 3)
         obj_proj, in_img = project_points(
             obj_pts_moved, poses, Ks, dist_coeffs, H, W
@@ -334,10 +346,14 @@ class Object3DSeg:
         Args:
             output (str): Path to save the 3D object mask
         """
+        if self.pose_change is not None:
+            pose_change = self.pose_change.cpu()
+        else:
+            pose_change = None
         data_to_save = {
             'bbox_min': self.bbox_min.cpu(), 'bbox_max': self.bbox_max.cpu(),
             'voxel': self.voxel_original.cpu(),
-            'pose_change': self.pose_change.cpu(),
+            'pose_change': pose_change,
             'mask_dilate_uniform': self.mask_dilate_uniform,
             'mask_dilate_top': self.mask_dilate_top
         }
@@ -476,7 +492,7 @@ class Obj3DFeats:
             mm = matcher({'image0': obj_feats, 'image1': feats})
             _, _, mm = [rbd(x) for x in [obj_feats, feats, mm]]
             # Uncomment to filter low-confidence matches
-            # mm["matches"] = mm["matches"][mm["scores"] > 0.5, :]
+            # mm["matches"] = mm["matches"][mm["scores"] > 0.4, :]
             matched3D = obj_pts3D[mm["matches"][:, 0]]
             matches.append(mm["matches"][:, 1])
             matched_pts3D.append(matched3D)
