@@ -18,7 +18,8 @@ Below is the structure of the data folder:
 scene_name
   -rgb: Pre-change images
   -rgb_new: Post-change images
-  -rgb_eval: Evaluation images at novel post-change views
+    - Images at indices 0, 2, 4, ... are used for change detection
+    - Images at indices 1, 2, 5, ... are used for evaluation
   -masks_gt: Ground truth change masks for evaluation images
 ```
 
