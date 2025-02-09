@@ -91,6 +91,10 @@ else
   exit 1
 fi
 
+# Duplicate the rgb and rgb_new to rgb_distorted and rgb_new_distorted
+cp -r ${DATA_FOLDER}/rgb ${DATA_FOLDER}/rgb_distorted
+cp -r ${DATA_FOLDER}/rgb_new ${DATA_FOLDER}/rgb_new_distorted
+
 # Undistort images
 python $UNDISTORT_SCRIPT -s ${DATA_FOLDER}
 
