@@ -16,11 +16,14 @@ All the RGB images have been pre-processed (i.e. downscaled and undistorted).
 Below is the structure of the data folder:
 ```
 scene_name
-  -rgb: Pre-change images
-  -rgb_new: Post-change images
+  - rgb: Pre-change images
+  - rgb_new: Post-change images
     - Images at indices 0, 2, 4, ... are used for change detection
     - Images at indices 1, 3, 5, ... are used for evaluation
-  -masks_gt: Ground truth change masks for evaluation images
+  - masks_gt: Ground truth change masks for evaluation images
+  - nerfstudio_models: Pre-change 3DGS model weights
+  - nerfstudio_models: config file for the pre-change 3DGS model
+  - transforms.json: Pre- and post-change camera poses in NerfStudio format
 ```
 
 ## Installation
