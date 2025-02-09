@@ -87,11 +87,16 @@ pip install git+https://github.com/cvg/Hierarchical-Localization.git@73a3cb0f596
 
 ```
 python nerfstudio/scripts/change_det.py \
-  -c <data_folder>/<scene_name>/config.yml \
-  -t <data_folder>/<scene_name>/transforms.json \
-  -o <data_folder>/<scene_name> \
-  -ckpt <data_folder>/<scene_name>/nerfstudio_models/
+  --config <data_folder>/<scene_name>/config.yml \
+  --transform <data_folder>/<scene_name>/transforms.json \
+  --output <data_folder>/<scene_name> \
+  --ckpt <data_folder>/<scene_name>/nerfstudio_models/
 ```
+
+**NOTE**: 
+1. All output masks are saved under `<data_folder>/<scene_name>/masks_new/`. The `mask_*.png` files are the object move-out masks (previous location), and the `mask_new_*.png` files are the move-in masks (new location).
+2. We have uploaded the pre-change 3DGS models with the data. This means you do not need to train the pre-change 3DGS models.
+3. The post-change camera pose estimation is already handled for you, and the poses are stored in the transforms.json file.
 
 
 ### Run on custom data
