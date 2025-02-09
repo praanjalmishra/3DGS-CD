@@ -10,6 +10,8 @@ TLDR: We estimate **3D object-level changes** from two sets of unaligned RGB ima
 [![Watch the video](https://via.placeholder.com/100)](https://github.com/user-attachments/assets/ef073079-6bed-4a06-8f0e-4e765a5fd680)
 
 ## Data
+<details>
+  <summary>Click to expand</summary>
 
 The **3DGS-CD dataset** can be found [here](https://drive.google.com/drive/folders/1OPUu643bkbAoryASNMi8_iDJGnypotc0?usp=drive_link).
 All the RGB images have been pre-processed (i.e. downscaled and undistorted).
@@ -22,11 +24,17 @@ scene_name
     - Images at indices 1, 3, 5, ... are used for evaluation
   - masks_gt: Ground truth change masks for evaluation images
   - nerfstudio_models: Pre-change 3DGS model weights
-  - config.yml: config file for the pre-change 3DGS model
+  - config.yml: Config file for the pre-change 3DGS model
   - transforms.json: Pre- and post-change camera poses in NerfStudio format
+  - configs.json: Hyper-parameters
 ```
+</details>
+
 
 ## Installation
+
+<details>
+  <summary>Click to expand</summary>
 
 ### 1. Install nerfstudio dependencies
 
@@ -82,9 +90,11 @@ Download the EfficientSAM model weight from [here](https://github.com/yformer/Ef
 ```bash
 pip install git+https://github.com/cvg/Hierarchical-Localization.git@73a3cb0f59659306eb6c15c7213137b2196c5ceb
 ```
-
+</details>
 
 ## Instructions
+<details>
+  <summary>Click to expand</summary>
 
 ### Run on our data
 
@@ -104,4 +114,40 @@ python nerfstudio/scripts/change_det.py \
 
 ### Run on custom data
 
-Our code will be released soon!
+#### 1. Data capture:
+Use your phone (tested with iPhone-13 mini) to capture >150 images for your scene, make object-level changes and capture another ~10 images of the changed state of the scene.
+
+#### 2. Data Processing
+#### 3. Run our method
+</details>
+
+## Known Issues
+<details>
+  <summary>Click to expand</summary>
+
+### Parameter tuning
+If the data is not captured carefully, our method can be sensitive to hyperparameters. Below are the key parameters we recommend tuning first:
+
+### Bug!
+It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please open an issue to let us know.
+</details>
+
+## Future Directions and Ideas
+<details>
+  <summary>Click to expand</summary>
+
+We’re excited about the future directions this work inspires and enables! Below, we highlight some promising research opportunities. If you're interested in exploring any of these, feel free to reach out—we’d love to chat!
+
+### Sparse-view 3DGS-CD
+Can we detect 3D changes with just 4 pre-change images and 4 post-change images?!
+
+### 3DGS-CD enables robot workspace reset
+
+### Update-able radiance field models to 3D scene changes
+
+### Non-rigid 3DGS-CD
+
+</details>
+
+
+
