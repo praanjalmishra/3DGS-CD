@@ -1116,10 +1116,8 @@ class ChangeDet:
             for ii, pose_change in enumerate(pose_changes):
                 obj_segs[ii].set_pose_change(pose_change)
                 print(pose_change)
-        # Save object 3D segmentation w/ updated pose changes
-        for ii, obj_seg in enumerate(obj_segs):
-            obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
         
+        # Sec.IV.H: Occlusion-Aware Mask Projection
         # Optimize eval camera poses
         if refine_pose:
             rgbs_eval, eval_fnames, _, _, _, cams_eval = \
@@ -1135,7 +1133,7 @@ class ChangeDet:
                 id_int = extract_last_number(path.name)
                 eval_file_ids.append(id_int)
 
-        # Save eval masks
+        # Project 3D obj segs to eval images
         _, val_files, _, _, _, _ = read_transforms(
             transforms_json, read_images=False, mode="val"
         )
@@ -1155,16 +1153,20 @@ class ChangeDet:
         for ii, path in enumerate(val_files):
             id_int = extract_last_number(path.name)
             val_file_ids.append(id_int)
+        # Save masks
+        mask_output_dir = self.output_dir / "masks_new"
+        os.makedirs(mask_output_dir, exist_ok=True)
         mask_files = [
-            self.output_dir / "masks_new" / f"mask_{ii:05g}.png"
-            for ii in val_file_ids
+            mask_output_dir / f"mask_{ii:05g}.png" for ii in val_file_ids
         ]
         save_masks(val_masks_move_out_no_occl, mask_files)
         mask_files = [
-            self.output_dir / "masks_new" / f"mask_new_{ii:05g}.png"
-            for ii in val_file_ids
+            mask_output_dir / f"mask_new_{ii:05g}.png" for ii in val_file_ids
         ]
         save_masks(val_masks_move_in_no_occl, mask_files)
+        # # Uncomment to save object 3D segmentations
+        # for ii, obj_seg in enumerate(obj_segs+obj_segs_inserted):
+        #     obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
 
 
 if __name__ == "__main__":
