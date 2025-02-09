@@ -70,6 +70,7 @@ def eval_setup(
     test_mode: Literal["test", "val", "inference"] = "test",
     update_config_callback: Optional[Callable[[TrainerConfig], TrainerConfig]] = None,
     checkpoint_dir: Optional[Path] = None,
+    data_path: Optional[Path] = None,
 ) -> Tuple[TrainerConfig, Pipeline, Path, int]:
     """Shared setup for loading a saved pipeline for evaluation.
 
@@ -104,6 +105,10 @@ def eval_setup(
         config.load_dir = config.get_checkpoint_dir()
     else:
         config.load_dir = checkpoint_dir
+
+    # workaround for user's datapath being different from the one in config.yml
+    if data_path is not None:
+        config.pipeline.datamanager.dataparser.data = data_path
 
     # setup pipeline (which includes the DataManager)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

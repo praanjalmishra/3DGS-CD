@@ -752,18 +752,18 @@ class ChangeDet:
                 configs = json.load(f)
 
         assert self.output_dir.exists(), f"{self.output_dir} does not exist"
+        assert transforms_json is not None, "Need transforms.json for CD!"
 
         # Load pre-trained 3DGS
         assert os.path.isfile(self.load_config)
         _, self.pipeline_pretrain, _, _ = eval_setup(
             self.load_config, test_mode="inference",
-            checkpoint_dir=checkpoint_dir
+            checkpoint_dir=checkpoint_dir, data_path=Path(transforms_json).parent
         )
 
         device = self.device
         # ----------------------------Load data -------------------------------
         # Load pre-training images and camera info + new images and camera info
-        assert transforms_json is not None, "Need transforms.json for CD!"
         color_images, img_fnames, c2w, K, dist_params, cameras = \
             read_transforms(transforms_json)
         # Undistort images
