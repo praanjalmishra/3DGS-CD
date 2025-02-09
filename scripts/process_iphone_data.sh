@@ -4,7 +4,7 @@
 
 DATA_FOLDER=${1:-"/home/ziqi/Desktop/test/masks"}
 NUM_DOWNSCALES=${2:-2}
-NERFSTUDIO_FOLDER=${3:-"/home/ziqi/Packages/nerfstudio"}
+NERFSTUDIO_FOLDER=${3:-"/home/ziqi/Packages/3dgscd"}
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nerfgs

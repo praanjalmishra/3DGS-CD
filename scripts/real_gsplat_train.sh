@@ -1,8 +1,8 @@
-# Script to automate SplatFacto training on real data
+# Script to automate 3DGS-CD on real data
 #!/bin/bash
 # Pre-requisites:
 # 1. Install NeRFStudio
-# 2. Install SAM & hloc into nerfstudio conda env
+# 2. Install EfficientSAM & hloc into your gscd conda env
 # 3. Download the following scripts
 # 4. Move the scripts to corresponding locations or other user-specified dirs
 # 5. Take images and organize them in the following folder structure:
@@ -19,18 +19,17 @@
 DATA_FOLDER=${1:-"/home/ziqi/Desktop/test/WaterCube0"}
 CUDA_VISIBLE_DEVICES=${2:-0}
 TRAIN_IDX=${3:-"0 2 4 6"} # Indices of sparse images used for training
-OUTPUT_FOLDER=${4:-"/home/ziqi/Packages/nerfstudio/outputs"}
-KUBRIC_FOLDER=${5:-"/home/ziqi/Packages/kubric"}
-NERFSTUDIO_FOLDER=${6:-"/home/ziqi/Packages/nerfstudio"}
-MERGE_SCRIPT=${7:-"/home/ziqi/Packages/nerfstudio/scripts/merge_colmap_data.py"}
-EDIT_SCRIPT=${8:-"/home/ziqi/Packages/nerfstudio/scripts/edit_nerf_data.py"}
-UNDISTORT_SCRIPT=${9:-"/home/ziqi/Packages/nerfstudio/scripts/undistort_transforms.py"}
+OUTPUT_FOLDER=${4:-"/home/ziqi/Packages/3dgscd/outputs"}
+NERFSTUDIO_FOLDER=${5:-"/home/ziqi/Packages/3dgscd"}
+MERGE_SCRIPT=${6:-"/home/ziqi/Packages/3dgscd/scripts/merge_colmap_data.py"}
+EDIT_SCRIPT=${7:-"/home/ziqi/Packages/3dgscd/scripts/edit_nerf_data.py"}
+UNDISTORT_SCRIPT=${8:-"/home/ziqi/Packages/3dgscd/scripts/undistort_transforms.py"}
 
 
 # ------------------ Setup Environment ------------------
 # May need to build a conda env with dependencies required by the .py scripts
 source ~/miniconda3/etc/profile.d/conda.sh
-conda activate nerfgs
+conda activate gscd
 cd $NERFSTUDIO_FOLDER
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
 current_time=$(date +%Y-%m-%d_%H%M%S)
