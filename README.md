@@ -98,6 +98,12 @@ Download the EfficientSAM model weight from [here](https://github.com/yformer/Ef
 ```bash
 pip install git+https://github.com/cvg/Hierarchical-Localization.git@73a3cb0f59659306eb6c15c7213137b2196c5ceb
 ```
+#### 2.3 Install LightGlue
+
+```bash
+pip install git+https://github.com/cvg/LightGlue@035612541779b17897aa06d6ff19cb4060111616
+```
+
 </details>
 
 ## Instructions
@@ -180,7 +186,14 @@ proj_check_cutoff
 
 ### Bug!
 It wouldn’t be surprising if a bug slipped in somewhere in the pipeline. If you catch a bug, please [submit a PR](https://github.com/520xyxyzq/3DGS-CD/pulls) or open an issue to let us know.
+
+**NOTE:**
+1. Add `--debug` to [this line](https://github.com/520xyxyzq/3DGS-CD/blob/853b8621ce41715e366b456bebe28b34a8ad0340/scripts/real_gsplat_train.sh#L173) to enable debugging. Also remember to change [this line](https://github.com/520xyxyzq/3DGS-CD/blob/853b8621ce41715e366b456bebe28b34a8ad0340/nerfstudio/scripts/change_det.py#L76) to your debug folder.
+
+
+
 </details>
+
 
 ## Future Directions and Ideas
 <details>
