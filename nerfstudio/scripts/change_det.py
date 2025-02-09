@@ -687,12 +687,11 @@ class ChangeDet:
                 "mask_refine_sparse_view": 0.0,
                 "area_threshold": 0.01,
                 "pcd_filtering": 0.98,
-                "pre_train_refine_bbox_expand": 0.1,
+                "pre_train_pred_bbox_expand": 0.05,
                 "voxel_dim": 400,
                 "bbox3d_expand": 1.8,
                 "mask3d_dilate_uniform": 1,
-                "mask3d_dilate_top": 1,
-                "move_out_dilate": 31,
+                "mask3d_dilate_top": 0,
                 "pose_change_break": None,
                 "pose_refine_lr": 1e-3,
                 "pose_refine_epochs": 100,
@@ -915,6 +914,57 @@ class ChangeDet:
             print(f"inlier_ratio: {num_inliers} / {num_matches}")
             pose_changes.append(pose_change)
         # # Uncomment to debug
+        # debug_point_cloud(pcds[-1], self.debug_dir)
+
+        # Get object move-in masks across post-change views
+        masks_move_in_sparse_view = []
+        for ii, masks_changed in enumerate(masks_changed_sparse):
+            masks_captured, scores_captured = effsam_refine_masks(
+                rgbs_captured_sparse_view[ii:ii+1], masks_changed,
+                expand=configs["mask_refine_sparse_view"]
+            )
+            # Move-in masks have SAM prediction score > 0.95 on captured image
+            masks_in = [
+                masks_captured[i:i+1] for i, s in enumerate(scores_captured)
+                if s > 0.95
+            ]
+            if len(masks_in) > 0:
+                masks_in = torch.cat(masks_in, dim=0)
+                masks_in = split_masks(masks_in, configs["area_threshold"])
+            else:
+                masks_in = torch.empty(0, 1, H, W, device=device)
+            masks_move_in_sparse_view.append(masks_in)
+
+        # Move-in masks w/ few inlier matches to obj templates are for inserted
+        feats_move_in = self.get_features_in_masks(
+            rgbs_captured_sparse_view, masks_move_in_sparse_view
+        )
+        masks_move_in_inserted = []
+        for feats_i, masks_i in zip(feats_move_in, masks_move_in_sparse_view):
+            masks_move_in_inserted_i = []
+            for feat_i, mask_i in zip(feats_i, masks_i):
+                num_inlier_max = 0
+                for pcd_feat in pcd_feats:
+                    _, num_inlier, _ = pcd_feat.PnP(
+                        feat_i, Ks_sparse_view[0], H, W
+                    )
+                    num_inlier_max = max(num_inlier_max, num_inlier)
+                if num_inlier_max < 4:
+                    masks_move_in_inserted_i.append(mask_i[None])
+            if len(masks_move_in_inserted_i) > 0:
+                masks_move_in_inserted_i = torch.cat(
+                    masks_move_in_inserted_i, dim=0
+                )
+            else:
+                masks_move_in_inserted_i = torch.empty(
+                    0, 1, H, W, device=device
+                )
+            masks_move_in_inserted.append(masks_move_in_inserted_i)
+
+        obj_masks_move_in, obj_move_in_view_indices = self.match_move_in(
+            rgbs_captured_sparse_view, masks_move_in_inserted
+        )
+
         # Sec.IV.E: 3D object segmentation
         # Get more 2D masks for moved and removed objects
         if len(pcds) > 0:
@@ -986,13 +1036,12 @@ class ChangeDet:
 
         # Multi-view mask fusion
         obj_segs = []
-        for ii in range(len(pcds)):
+        # For moved and removed objects
+        for ii in range(len(pcds)): 
             bbox3d = compute_3D_bbox(pcds[ii])
             print(f"bbox3d: {bbox3d}")
             expanded_bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
-            voxel = bbox2voxel(
-                expanded_bbox3d, configs["voxel_dim"], self.device
-            )
+            voxel = bbox2voxel(expanded_bbox3d, configs["voxel_dim"], device)
             occ_grid = proj_check_3D_points(
                 voxel, cam_poses_pretrain_view[high_score_inds[ii]], 
                 Ks_pretrain_view[high_score_inds[ii]],
@@ -1007,6 +1056,50 @@ class ChangeDet:
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
             obj_segs.append(obj3Dseg)
+        # For inserted objects
+        obj_segs_inserted = []
+        for ii, (obj_mask_move_in, obj_in_ind) in enumerate(
+            zip(obj_masks_move_in, obj_move_in_view_indices)
+        ):
+            # 1st pass proj_check for sampled 3D pts to get a rough 3D bbox
+            gauss_means = self.pipeline_pretrain.model.gauss_params.means
+            gauss_means = point_cloud_filtering(gauss_means, 0.5)
+            min_xyz = gauss_means.min(dim=0)[0]
+            max_xyz = gauss_means.max(dim=0)[0]
+            pts_sampled = torch.rand(1000000, 3, device=device) * \
+                (max_xyz - min_xyz) + min_xyz
+            pts_sampled = point_cloud_filtering(pts_sampled, 0.3)
+            occupied = proj_check_3D_points(
+                pts_sampled, cam_poses_sparse_view[obj_in_ind],
+                Ks_sparse_view[obj_in_ind],
+                dist_params_sparse_view[obj_in_ind],
+                obj_mask_move_in, cutoff=0.99
+            )
+            pts_occupy = pts_sampled[occupied]
+            bbox3d = (
+                pts_occupy.min(dim=0)[0].detach().cpu().numpy(),
+                pts_occupy.max(dim=0)[0].detach().cpu().numpy()
+            )
+            bbox3d = expand_3D_bbox(bbox3d, configs["bbox3d_expand"])
+            print(f"bbox3d: {bbox3d}")            
+            voxel = bbox2voxel(bbox3d, configs["voxel_dim"], device)
+            # 2nd pass proj_check for voxel grids to get object occupancy grid
+            occ_grid = proj_check_3D_points(
+                voxel, cam_poses_sparse_view[obj_in_ind], 
+                Ks_sparse_view[obj_in_ind],
+                dist_params_sparse_view[obj_in_ind],
+                obj_mask_move_in, cutoff=configs["proj_check_cutoff"]
+            )
+            obj3Dseg = Object3DSeg(
+                *bbox3d, occ_grid, torch.eye(4, device=device), # dummy
+                bbox3d, 0, 0
+            )
+            # # Uncomment to debug
+            # obj3Dseg.visualize(self.debug_dir)
+            obj_segs_inserted.append(obj3Dseg)
+        num_moved = sum(
+            [i for i in range(len(obj_segs)) if obj_segs[i] is not None]
+        )
         print(f"# Moved objects: {num_moved}")
         print(f"# Removed objects: {len(obj_segs) - num_moved}")
         print(f"# Inserted objects: {len(obj_segs_inserted)}")
@@ -1037,7 +1130,7 @@ class ChangeDet:
             rgbs_eval, eval_fnames, _, _, _, cams_eval = \
                 read_transforms(transforms_json, mode="val")
             _, cams_eval = self.refine_obj_pose_change(
-                rgbs_eval.to(device), obj_segs, cams_eval,
+                rgbs_eval.to(device), obj_segs+obj_segs_inserted, cams_eval,
                 lr=configs["pose_refine_lr"],
                 epochs=configs["pose_refine_epochs"],
                 patience=configs["pose_refine_patience"], optim="cam"
@@ -1052,8 +1145,14 @@ class ChangeDet:
             transforms_json, read_images=False, mode="val"
         )
         val_masks_move_out_no_occl = self.mask_proj(
+            cams_eval, obj_segs+obj_segs_inserted, new=False,
+            dilate=configs["val_move_out_dilate_3d"],
+            occlusion_check=[True]*len(obj_segs)+[False]*len(obj_segs_inserted)
         )
         val_masks_move_in_no_occl = self.mask_proj(
+            cams_eval, obj_segs+obj_segs_inserted, new=True,
+            dilate=configs["val_move_in_dilate_3d"],
+            occlusion_check=[True]*len(obj_segs)+[False]*len(obj_segs_inserted)
         )
         val_file_ids = []
         for ii, path in enumerate(val_files):
