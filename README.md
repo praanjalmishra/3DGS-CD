@@ -19,8 +19,21 @@ scene_name
   -rgb: Pre-change images
   -rgb_new: Post-change images
     - Images at indices 0, 2, 4, ... are used for change detection
-    - Images at indices 1, 2, 5, ... are used for evaluation
+    - Images at indices 1, 3, 5, ... are used for evaluation
   -masks_gt: Ground truth change masks for evaluation images
 ```
+
+### Run on our data
+
+```
+python nerfstudio/scripts/change_det.py \
+  -c <data_folder>/<scene_name>/config.yml \
+  -t <data_folder>/<scene_name>/transforms.json \
+  -o <data_folder>/<scene_name> \
+  -ckpt <data_folder>/<scene_name>/nerfstudio_models/
+```
+
+
+### Run on custom data
 
 Our code will be released soon!
