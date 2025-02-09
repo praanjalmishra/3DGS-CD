@@ -124,13 +124,13 @@ python nerfstudio/scripts/change_det.py \
 
 #### 1. Data capture:
 
-(1) Use your camera (tested with iPhone-13 mini camera) to capture >150 images for your scene
+(1) Use your camera (tested with iPhone-13 mini camera) to capture >150 images for your scene.
 
-(2) Make object-level changes, such as removing an object or moving an object.
+(2) Make object-level changes, such as removing or moving an object.
 
 (3) Capture 1~10 images of the changed state of the scene at different angles.
 
-(4) Upload your images to your favorite folder, e.g. `<data_folder>/<scene_name>/`
+(4) Upload your images to your favorite folder, e.g. `<data_folder>/<scene_name>/`.
 
 (5) Organize them in the following data structure:
 
@@ -143,15 +143,15 @@ scene_name
 **NOTE:**
 1. When capturing pre-change images, try to sufficiently cover your scene to make sure the pre-change 3DGS has a reasonable rendering quality for novel views.
 2. When capturing post-change images, make sure most 3D changes (both old and new object 3D locations) are visible to the images.
-3. We recommend starting  with a simple case where a single object moves.
+3. We recommend starting with a simple case where a single object moves.
 
 #### 2. Data Processing
 
-Process and downscale the captured images using this script.
+Process and downscale the captured images using [this script](scripts/process_iphone_data.sh).
 
 #### 3. Run our method
 
-Run our method using this script.
+Run our method using [this script](scripts/real_gsplat_train.sh).
 
 </details>
 
