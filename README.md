@@ -22,7 +22,7 @@ scene_name
     - Images at indices 1, 3, 5, ... are used for evaluation
   - masks_gt: Ground truth change masks for evaluation images
   - nerfstudio_models: Pre-change 3DGS model weights
-  - nerfstudio_models: config file for the pre-change 3DGS model
+  - config.yml: config file for the pre-change 3DGS model
   - transforms.json: Pre- and post-change camera poses in NerfStudio format
 ```
 
@@ -99,7 +99,7 @@ python nerfstudio/scripts/change_det.py \
 **NOTE**: 
 1. All output masks are saved under `<data_folder>/<scene_name>/masks_new/`. The `mask_*.png` files are the object move-out masks (previous location), and the `mask_new_*.png` files are the move-in masks (new location).
 2. We have uploaded the pre-change 3DGS models with the data. This means you do not need to train the pre-change 3DGS models.
-3. The post-change camera pose estimation is already handled for you, and the poses are stored in the transforms.json file.
+3. The post-change camera pose estimation is already handled for you, and the poses are stored in the `transforms.json` file.
 
 
 ### Run on custom data
