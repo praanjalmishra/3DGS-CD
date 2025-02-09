@@ -729,13 +729,13 @@ class ChangeDet:
                 "area_threshold": 0.01,
                 "pcd_filtering": 0.98,
                 "pre_train_pred_bbox_expand": 0.05,
-                "voxel_dim": 400,
+                "voxel_dim": 200,
                 "bbox3d_expand": 1.8,
                 "mask3d_dilate_uniform": 1,
                 "mask3d_dilate_top": 0,
                 "pose_change_break": None,
                 "pose_refine_lr": 1e-3,
-                "pose_refine_epochs": 100,
+                "pose_refine_epochs": 50,
                 "pose_refine_patience": 20,
                 "vis_check_threshold": 0.8,
                 "proj_check_cutoff": 0.95,
@@ -780,7 +780,6 @@ class ChangeDet:
             # Get sparse-view captured images
             rgbs_captured_sparse_view = \
                 color_images[sparse_view_indices].to(device)
-
         else: # hardcode sparse view indices
             # TODO: Remove the hard-coded GT input between the lines
             num_images, split_fraction = 200, 0.9
@@ -833,7 +832,7 @@ class ChangeDet:
         #     rgbs_render_sparse_view, rgbs_captured_sparse_view, self.debug_dir
         # )
 
-        # Change detection on sparse views
+        # Sec.IV.C: 2D Change detection on post-change views
         masks_changed_sparse, masks_changed_sparse_all = [], []
         for ii in range(len(sparse_view_file_ids)): 
             masks_changed, masks_changed_all = self.image_diff(
@@ -885,7 +884,9 @@ class ChangeDet:
         #     f"{self.debug_dir}/masks_move_out{i}.png"
         #     for i in range(len(masks_to_save))
         # ])
-        # Multi-view move-out mask association 
+
+        # Sec.IV.D: Change-aware object association across post-change views
+        # Multi-view move-out mask association to get obj templates
         pcds, pcd_feats = self.match_move_out(
             rgbs_render_sparse_view[no_overlap_ind],
             depths_sparse_view[no_overlap_ind],
@@ -893,6 +894,55 @@ class ChangeDet:
             cam_poses_sparse_view[no_overlap_ind],
             Ks_sparse_view[no_overlap_ind],
             pcd_filter=configs["pcd_filtering"]
+        )
+
+        # Multi view move-in mask association across post-change views
+        masks_move_in_sparse_view = []
+        for ii, masks_changed in enumerate(masks_changed_sparse):
+            masks_captured, scores_captured = effsam_refine_masks(
+                rgbs_captured_sparse_view[ii:ii+1], masks_changed,
+                expand=configs["mask_refine_sparse_view"]
+            )
+            # Move-in masks have SAM prediction score > 0.95 on captured image
+            masks_in = [
+                masks_captured[i:i+1] for i, s in enumerate(scores_captured)
+                if s > 0.95
+            ]
+            if len(masks_in) > 0:
+                masks_in = torch.cat(masks_in, dim=0)
+                masks_in = split_masks(masks_in, configs["area_threshold"])
+            else:
+                masks_in = torch.empty(0, 1, H, W, device=device)
+            masks_move_in_sparse_view.append(masks_in)
+
+        # Move-in masks w/ few inlier matches to obj templates are for inserted
+        feats_move_in = self.get_features_in_masks(
+            rgbs_captured_sparse_view, masks_move_in_sparse_view
+        )
+        masks_move_in_inserted = []
+        for feats_i, masks_i in zip(feats_move_in, masks_move_in_sparse_view):
+            masks_move_in_inserted_i = []
+            for feat_i, mask_i in zip(feats_i, masks_i):
+                num_inlier_max = 0
+                for pcd_feat in pcd_feats:
+                    _, num_inlier, _ = pcd_feat.PnP(
+                        feat_i, Ks_sparse_view[0], H, W
+                    )
+                    num_inlier_max = max(num_inlier_max, num_inlier)
+                if num_inlier_max < 4:
+                    masks_move_in_inserted_i.append(mask_i[None])
+            if len(masks_move_in_inserted_i) > 0:
+                masks_move_in_inserted_i = torch.cat(
+                    masks_move_in_inserted_i, dim=0
+                )
+            else:
+                masks_move_in_inserted_i = torch.empty(
+                    0, 1, H, W, device=device
+                )
+            masks_move_in_inserted.append(masks_move_in_inserted_i)
+
+        obj_masks_move_in, obj_move_in_view_indices = self.match_move_in(
+            rgbs_captured_sparse_view, masks_move_in_inserted
         )
 
         # Sec.IV.F: Object pose change estimate
@@ -956,55 +1006,10 @@ class ChangeDet:
             pose_changes.append(pose_change)
         # # Uncomment to debug
         # debug_point_cloud(pcds[-1], self.debug_dir)
-
-        # Get object move-in masks across post-change views
-        masks_move_in_sparse_view = []
-        for ii, masks_changed in enumerate(masks_changed_sparse):
-            masks_captured, scores_captured = effsam_refine_masks(
-                rgbs_captured_sparse_view[ii:ii+1], masks_changed,
-                expand=configs["mask_refine_sparse_view"]
-            )
-            # Move-in masks have SAM prediction score > 0.95 on captured image
-            masks_in = [
-                masks_captured[i:i+1] for i, s in enumerate(scores_captured)
-                if s > 0.95
-            ]
-            if len(masks_in) > 0:
-                masks_in = torch.cat(masks_in, dim=0)
-                masks_in = split_masks(masks_in, configs["area_threshold"])
-            else:
-                masks_in = torch.empty(0, 1, H, W, device=device)
-            masks_move_in_sparse_view.append(masks_in)
-
-        # Move-in masks w/ few inlier matches to obj templates are for inserted
-        feats_move_in = self.get_features_in_masks(
-            rgbs_captured_sparse_view, masks_move_in_sparse_view
-        )
-        masks_move_in_inserted = []
-        for feats_i, masks_i in zip(feats_move_in, masks_move_in_sparse_view):
-            masks_move_in_inserted_i = []
-            for feat_i, mask_i in zip(feats_i, masks_i):
-                num_inlier_max = 0
-                for pcd_feat in pcd_feats:
-                    _, num_inlier, _ = pcd_feat.PnP(
-                        feat_i, Ks_sparse_view[0], H, W
-                    )
-                    num_inlier_max = max(num_inlier_max, num_inlier)
-                if num_inlier_max < 4:
-                    masks_move_in_inserted_i.append(mask_i[None])
-            if len(masks_move_in_inserted_i) > 0:
-                masks_move_in_inserted_i = torch.cat(
-                    masks_move_in_inserted_i, dim=0
-                )
-            else:
-                masks_move_in_inserted_i = torch.empty(
-                    0, 1, H, W, device=device
-                )
-            masks_move_in_inserted.append(masks_move_in_inserted_i)
-
-        obj_masks_move_in, obj_move_in_view_indices = self.match_move_in(
-            rgbs_captured_sparse_view, masks_move_in_inserted
-        )
+        num_moved = len([_ for pc in pose_changes if pc is not None])
+        print(f"# Moved objects: {num_moved}")
+        print(f"# Removed objects: {len(pose_changes) - num_moved}")
+        print(f"# Inserted objects: {len(obj_masks_move_in)}")
 
         # Sec.IV.E: 3D object segmentation
         # Get more 2D masks for moved and removed objects
@@ -1124,12 +1129,6 @@ class ChangeDet:
             # # Uncomment to debug
             # obj3Dseg.visualize(self.debug_dir)
             obj_segs_inserted.append(obj3Dseg)
-        num_moved = sum(
-            [i for i in range(len(obj_segs)) if obj_segs[i] is not None]
-        )
-        print(f"# Moved objects: {num_moved}")
-        print(f"# Removed objects: {len(obj_segs) - num_moved}")
-        print(f"# Inserted objects: {len(obj_segs_inserted)}")
 
         # Sec.IV.G: Global pose refinement
         if refine_pose and len(pcds) > 0:
