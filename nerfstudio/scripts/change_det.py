@@ -729,7 +729,7 @@ class ChangeDet:
                 "area_threshold": 0.01,
                 "pcd_filtering": 0.98,
                 "pre_train_pred_bbox_expand": 0.05,
-                "voxel_dim": 200,
+                "voxel_dim": 300,
                 "bbox3d_expand": 1.8,
                 "mask3d_dilate_uniform": 1,
                 "mask3d_dilate_top": 0,
@@ -759,58 +759,27 @@ class ChangeDet:
         device = self.device
         # ----------------------------Load data -------------------------------
         # Load pre-training images and camera info + new images and camera info
-        if transforms_json is not None:
-            color_images, img_fnames, c2w, K, dist_params, cameras = \
-                read_transforms(transforms_json)
-            # Undistort images
-            assert dist_params.sum() < 1e-6, \
-                "All images must be undistorted before change detection"
-            sparse_view_file_ids, train_file_ids = [], []
-            sparse_view_indices, pretrain_indices = [], []
-            for ii, path in enumerate(img_fnames):
-                id_int = extract_last_number(path.name)
-                if "rgb_new" in path.as_posix():
-                    sparse_view_file_ids.append(id_int)
-                    sparse_view_indices.append(ii)
-                else:
-                    pretrain_indices.append(ii)
-                train_file_ids.append(id_int)
+        assert transforms_json is not None, "Need transforms.json for CD!"
+        color_images, img_fnames, c2w, K, dist_params, cameras = \
+            read_transforms(transforms_json)
+        # Undistort images
+        assert dist_params.sum() < 1e-6, \
+            "All images must be undistorted before change detection"
+        sparse_view_file_ids, train_file_ids = [], []
+        sparse_view_indices, pretrain_indices = [], []
+        for ii, path in enumerate(img_fnames):
+            id_int = extract_last_number(path.name)
+            if "rgb_new" in path.as_posix():
+                sparse_view_file_ids.append(id_int)
+                sparse_view_indices.append(ii)
+            else:
+                pretrain_indices.append(ii)
+            train_file_ids.append(id_int)
 
-            N, _, H, W = color_images.shape
-            # Get sparse-view captured images
-            rgbs_captured_sparse_view = \
-                color_images[sparse_view_indices].to(device)
-        else: # hardcode sparse view indices
-            # TODO: Remove the hard-coded GT input between the lines
-            num_images, split_fraction = 200, 0.9
-            num_train_images = int(np.ceil(num_images * split_fraction))
-            train_file_ids = np.linspace(
-                0, num_images-1, num_train_images, dtype=int
-            ).tolist()
-            sparse_view_file_ids = [80, 85, 90, 95]
-            sparse_view_indices = [
-                train_file_ids.index(ii) for ii in sparse_view_file_ids
-            ]
-            assert self.pipeline_pretrain.datamanager.train_dataset is not None
-            pretrain_dataset = self.pipeline_pretrain.datamanager.train_dataset
-            # Read pre-training images and cameras
-            color_images, c2w, K, dist_params = read_dataset(
-                pretrain_dataset, read_images=True
-            )
-            cameras = pretrain_dataset.cameras
-            N, _, H, W = color_images.shape
-            # Get pre-training view indices
-            full_indices = torch.arange(N, device=device)
-            is_pretrain = torch.ones(N, dtype=torch.bool, device=device)
-            is_pretrain[sparse_view_indices] = False
-            pretrain_indices = full_indices[is_pretrain]
-            prefix="/home/ziqi/Packages/nerfstudio/data/nerfstudio/gt_masks/"
-            rgbs_sparse_paths=[
-                f"{prefix}/cube_rgb_new/frame_{idx:05g}.png"
-                for idx in sparse_view_file_ids
-            ]
-            rgbs_captured_sparse_view = \
-                read_imgs(rgbs_sparse_paths).to(device)
+        N, _, H, W = color_images.shape
+        # Get sparse-view captured images
+        rgbs_captured_sparse_view = \
+            color_images[sparse_view_indices].to(device)
         # Get sparse view camera parameters
         cameras_sparse_view = cameras[torch.tensor(sparse_view_indices)]
         cam_poses_sparse_view = c2w[sparse_view_indices]
@@ -1170,15 +1139,17 @@ class ChangeDet:
         _, val_files, _, _, _, _ = read_transforms(
             transforms_json, read_images=False, mode="val"
         )
+        # not checking occlusion for inserted object for now
+        occlusion_check = [True]*len(obj_segs) + [False]*len(obj_segs_inserted)
         val_masks_move_out_no_occl = self.mask_proj(
             cams_eval, obj_segs+obj_segs_inserted, new=False,
             dilate=configs["val_move_out_dilate_3d"],
-            occlusion_check=[True]*len(obj_segs)+[False]*len(obj_segs_inserted)
+            occlusion_check=occlusion_check
         )
         val_masks_move_in_no_occl = self.mask_proj(
             cams_eval, obj_segs+obj_segs_inserted, new=True,
             dilate=configs["val_move_in_dilate_3d"],
-            occlusion_check=[True]*len(obj_segs)+[False]*len(obj_segs_inserted)
+            occlusion_check=occlusion_check
         )
         val_file_ids = []
         for ii, path in enumerate(val_files):
