@@ -155,9 +155,16 @@ scene_name
 
 Process and downscale the captured images using [this script](scripts/process_iphone_data.sh).
 
+**NOTE:**
+1. Remember to update the default parameters at the top of this script.
+
 #### 3. Run our method
 
 Run our method using [this script](scripts/real_gsplat_train.sh).
+
+**NOTE:**
+1. Remember to update the default parameters at the top of this script.
+2. Modify `TRAIN_IDX` to indices of images in `rgb_new` you want to use for change detection.
 
 </details>
 
