@@ -148,9 +148,9 @@ scene_name
 
 **NOTE:**
 1. When capturing *pre-change* images, try to sufficiently cover your scene to make sure the pre-change 3DGS has a reasonable rendering quality for novel views.
-2. When capturing *pre-change* images, try to include the object you plan to move/remove in all images.
+2. When capturing *pre-change* images, try to include the object(s) you plan to move/remove in all images.
 3. When capturing *post-change* images, make sure most 3D changes (both old and new object 3D locations) are visible to the images.
-4. We recommend starting with a simple case where a single object moves.
+4. We recommend starting with a simple case where a single feature-rich object gets moved/removed.
 
 #### 2. Data Processing
 
