@@ -98,6 +98,12 @@ Download the EfficientSAM model weight from [here](https://github.com/yformer/Ef
 ```bash
 pip install git+https://github.com/cvg/Hierarchical-Localization.git@73a3cb0f59659306eb6c15c7213137b2196c5ceb
 ```
+
+Downgrade pycolmap to 0.4.0:
+```
+pip install pycolmap==0.4.0
+```
+
 #### 2.3 Install LightGlue
 
 ```bash
