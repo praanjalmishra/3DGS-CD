@@ -1166,9 +1166,9 @@ class ChangeDet:
             mask_output_dir / f"mask_new_{ii:05g}.png" for ii in val_file_ids
         ]
         save_masks(val_masks_move_in_no_occl, mask_files)
-        # # Uncomment to save object 3D segmentations
-        # for ii, obj_seg in enumerate(obj_segs+obj_segs_inserted):
-        #     obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
+        # Uncomment to save object 3D segmentations
+        for ii, obj_seg in enumerate(obj_segs+obj_segs_inserted):
+            obj_seg.save(self.output_dir / f"obj3Dseg{ii}.pt")
 
 
 if __name__ == "__main__":

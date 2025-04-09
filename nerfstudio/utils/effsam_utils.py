@@ -8,6 +8,7 @@ from nerfstudio.utils.debug_utils import (
     debug_bbox_prompts, debug_point_prompts
 )
 from tqdm import tqdm
+import torch.nn.functional as F
 
 
 # Load EfficientSAM model
@@ -85,47 +86,66 @@ def effsam_predict(rgbs, bboxes=None, points=None):
     """
     if rgbs.shape[1] == 1:
         rgbs = rgbs.repeat(1, 3, 1, 1)
-    elif rgbs.shape[1] == 3:
-        pass
-    else:
-        raise ValueError("RGB images are of shape (N, 3, H, W)")
-    assert bboxes is None or bboxes.shape[-1] == 4, \
-        "bbox prompts are of shape (N, 4)"
-    assert bboxes is None or bboxes.shape[0] == rgbs.shape[0], \
-        "Image bbox batch mismatch"
+    elif rgbs.shape[1] != 3:
+        raise ValueError("RGB images must be (N, 3, H, W)")
+
+    assert bboxes is None or bboxes.shape[-1] == 4, "bbox prompts must be (N, 4)"
+    assert bboxes is None or bboxes.shape[0] == rgbs.shape[0], "Mismatch between image and bbox batches"
+
     device = rgbs.device
     pts, pts_labels = [], []
+
     if bboxes is not None:
-        # Uncomment to debug
-        # debug_bbox_prompts(rgbs, bboxes, "/home/ziqi/Desktop/test/")
         bbox_pts = bboxes.reshape(bboxes.shape[0], 1, -1, 2)
-        # Make labels for bbox points: 2 for top-left, 3 for bottom-right
-        labels = torch.tensor([2, 3]).to(bbox_pts.device).reshape(1, 1, -1)
+        labels = torch.tensor([2, 3], device=bbox_pts.device).reshape(1, 1, -1)
         pts.append(bbox_pts)
         pts_labels.append(labels)
+
     if points is not None:
         assert points.shape[0] == rgbs.shape[0]
-        # Uncomment to debug
-        # debug_point_prompts(rgbs, points, "/home/ziqi/Desktop/test/")
         pts.append(points[:, None, :, :])
-        pts_labels.append(torch.ones(1, 1, points.shape[1]).to(device))
+        pts_labels.append(torch.ones(1, 1, points.shape[1], device=device))
+
     pts = torch.cat(pts, dim=2)
     pts_label = torch.cat(pts_labels, dim=2)
+
     masks, scores = [], []
+
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+
     for rgb, bbox_pt in tqdm(zip(rgbs, pts), desc="EffSAM"):
-        rgb = rgb.to(device)
-        bbox_pt = bbox_pt.to(device)
-        logits, iou = effsam(rgb[None, ...], bbox_pt[None, ...], pts_label)
+        try:
+            rgb = rgb.to(device)
+            bbox_pt = bbox_pt.to(device)
+
+            with torch.no_grad():
+                logits, iou = effsam(rgb[None, ...], bbox_pt[None, ...], pts_label)
+
+        except torch.cuda.OutOfMemoryError:
+            print("[EffSAM] CUDA OOM! Falling back to CPU.")
+            torch.cuda.empty_cache()
+            effsam.cpu()
+            rgb = rgb.cpu()
+            bbox_pt = bbox_pt.cpu()
+            pts_label_cpu = pts_label.cpu()
+
+            with torch.no_grad():
+                logits, iou = effsam(rgb[None, ...], bbox_pt[None, ...], pts_label_cpu)
+
+            effsam.to(device)  # Optionally move back to GPU for next
+
         sorted_ids = torch.argsort(iou, dim=-1, descending=True)
         iou = torch.take_along_dim(iou, sorted_ids, dim=2)
-        logits = torch.take_along_dim(
-            logits, sorted_ids[..., None, None], dim=2
-        )
+        logits = torch.take_along_dim(logits, sorted_ids[..., None, None], dim=2)
         mask = torch.ge(logits[0, 0, 0, :, :], 0)
+
         masks.append(mask)
         scores.append(iou[0, 0, 0].item())
+
     masks = torch.stack(masks, dim=0).unsqueeze(1)
     return masks, scores
+
 
 
 def effsam_batch_predict(rgb, bboxes):
@@ -133,54 +153,99 @@ def effsam_batch_predict(rgb, bboxes):
     Multi-bbox batch predict with EfficientSAM
 
     Args:
-        rgb (1, 3, H, W): RGB images
+        rgb (1, 3, H, W): RGB image
         bboxes (N, 4): Bbox prompts (xyxy)
-    
+
     Returns:
         masks (N, 1, H, W): Image masks
         scores (N-list): Confidence scores
     """
     assert rgb.shape[:2] == (1, 3)
     assert len(bboxes.shape) == 2 and bboxes.shape[-1] == 4
-    # # Uncomment to debug
-    # debug_bbox_prompts(
-    #     rgb.repeat(bboxes.shape[0], 1, 1, 1), bboxes,
-    #     "/home/ziqi/Desktop/test/"
-    # )
+
+    device = rgb.device
     bbox_pts = bboxes.reshape(1, bboxes.shape[0], 2, 2)
-    # Make labels for bbox points: 2 for top-left, 3 for bottom-right
-    labels = torch.tensor([2, 3]).to(bbox_pts.device)
-    labels = labels[None, None].repeat(1, bboxes.shape[0], 1)
-    logits, iou = effsam(rgb, bbox_pts, labels)
+    labels = torch.tensor([2, 3], device=bbox_pts.device).view(1, 1, 2).repeat(1, bboxes.shape[0], 1)
+
+    try:
+        rgb = rgb.to(device)
+        bbox_pts = bbox_pts.to(device)
+        labels = labels.to(device)
+
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+        with torch.no_grad():
+            logits, iou = effsam(rgb, bbox_pts, labels)
+
+    except torch.cuda.OutOfMemoryError:
+        print("[EffSAM] CUDA OOM in batch predict — falling back to CPU")
+        torch.cuda.empty_cache()
+        effsam.cpu()
+        rgb = rgb.cpu()
+        bbox_pts = bbox_pts.cpu()
+        labels = labels.cpu()
+
+        with torch.no_grad():
+            logits, iou = effsam(rgb, bbox_pts, labels)
+
+        effsam.to(device)
+
     sorted_ids = torch.argsort(iou, dim=-1, descending=True)
     iou = torch.take_along_dim(iou, sorted_ids, dim=2)
     logits = torch.take_along_dim(logits, sorted_ids[..., None, None], dim=2)
+
     masks = torch.ge(logits[0, :, 0, :, :], 0)
     masks = masks.unsqueeze(1)
     scores = iou[0, :, 0].tolist()
+
     return masks, scores
 
 
-def effsam_embedding(rgb, upsample=True):
+
+def effsam_embedding(rgb, upsample=True, target_size=(512, 512)):
     """
     Get pixel-aligned image embeddings
     @param rgb (HxWx3 np.array or 1x3xHxW tensor): Image
     @param upsample (bool): Whether to upsample the features
+    @param target_size (tuple): Resize input to this before embedding
     @return features (1xCxHxW tensor): Pixel-aligned image embeddings
     """
     if isinstance(rgb, np.ndarray):
         if rgb.dtype == np.uint8:
             rgb = rgb.astype(np.float32) / 255.0
-        rgb = torch.from_numpy(rgb).permute(2, 0, 1).to(device)[None, ...]
+        rgb = torch.from_numpy(rgb).permute(2, 0, 1)  # [3, H, W]
     elif isinstance(rgb, torch.Tensor):
-        assert rgb.dim() == 4, "Input tensor should be 1x1xHxW"
-        rgb = rgb.to(device)
-    features = effsam.get_image_embeddings(rgb).detach()
+        assert rgb.dim() in [3, 4]
+        if rgb.dim() == 4:
+            rgb = rgb.squeeze(0)  # [3, H, W]
+
+    import torchvision.transforms.functional as TF
+    orig_size = rgb.shape[1:]  # (H, W)
+    rgb_resized = TF.resize(rgb, target_size)  # [3, H', W']
+    rgb_resized = rgb_resized.unsqueeze(0).to(device)
+
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+
+    try:
+        with torch.no_grad():
+            features = effsam.get_image_embeddings(rgb_resized).detach()
+    except torch.cuda.OutOfMemoryError:
+        print("[EffSAM] CUDA OOM during embedding — switching to CPU")
+        effsam.cpu()
+        rgb_resized = rgb_resized.cpu()
+        with torch.no_grad():
+            features = effsam.get_image_embeddings(rgb_resized).detach()
+        effsam.to(device)
+
+    # Upsample back to original resolution if needed
     if upsample:
-        features = torch.nn.functional.interpolate(
-            features, rgb.shape[-2:], mode="bilinear", align_corners=False
+        features = F.interpolate(
+            features, size=orig_size, mode="bilinear", align_corners=False
         )
     return features
+
 
 
 def get_effsam_embedding_in_masks(rgbs, masks):
@@ -218,24 +283,35 @@ def effsam_refine_masks(rgb, masks, expand=0.1):
     Use SAM to refine the masks on a RGB image
 
     Args:
-        rgbs: (1, 3, H, W) RGB images
+        rgb: (1, 3, H, W) RGB image
         masks: (M, 1, H, W) Image masks
-        expand (float): How much we expand the extracted bbox as prompt (%) 
+        expand (float): Expansion percentage for bbox
 
     Returns:
-        masks_refined (M, 1, H, W): Refined image masks   
-        scores (M-list): Confidence scores     
+        masks_refined (M, 1, H, W): Refined image masks
+        scores (M-list): Confidence scores
     """
     assert rgb.shape[1] == 3
     assert len(masks.shape) == 4
+
     bboxes = []
     for mask in masks:
-        point_coords = torch.nonzero(mask.squeeze())[:, [1, 0]]
+        point_coords = torch.nonzero(mask.squeeze())[:, [1, 0]]  # (y, x) → (x, y)
+        if point_coords.shape[0] == 0:
+            # Skip empty masks
+            bboxes.append(torch.tensor([[0, 0, 1, 1]], device=mask.device, dtype=torch.float))
+            continue
         bbox = compute_2D_bbox(point_coords.unsqueeze(0))
         bbox = expand_2D_bbox(bbox, expand)
         bboxes.append(bbox)
+
     bboxes = torch.cat(bboxes, dim=0)
-    masks_refined, scores = effsam_predict(
-        rgb.repeat(masks.shape[0], 1, 1, 1), bboxes
-    )
+
+    try:
+        masks_refined, scores = effsam_predict(rgb.repeat(masks.shape[0], 1, 1, 1), bboxes)
+    except Exception as e:
+        print("[EffSAM] Refinement failed:", e)
+        masks_refined = masks
+        scores = [0.0 for _ in range(masks.shape[0])]
+
     return masks_refined, scores
