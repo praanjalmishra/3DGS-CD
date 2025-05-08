@@ -415,25 +415,33 @@ def image_align(img1, img2):
         align_mask (1x1xHxW): Mask for the aligned image, True for valid pixels
     """
     H, W = img1.shape[-2:]
-    # Image alignment to account for slight misalignment
     kp1, kp2, matches = image_matching(img1, img2)
-    assert matches[0].shape[0] > 4, "Need matches>4 to compute homo"
+
+    num_matches = matches[0].shape[0]
+    print(f"[image_align] Matches found: {num_matches}")
+
+    if num_matches <= 4:
+        print("⚠️ Not enough matches to compute homography — skipping alignment")
+        return img2, torch.ones_like(img1[:, :1, :, :], dtype=torch.bool)
+
     kp1 = kp1[0].cpu().numpy()
     kp2 = kp2[0].cpu().numpy()
     matches = matches[0].cpu().numpy()
+
     src_pts = np.float32([kp1[m[0]] for m in matches])
     dst_pts = np.float32([kp2[m[1]] for m in matches])
     M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-    img2 = img2[0].permute(1, 2, 0).cpu().numpy()
-    img2_aligned = cv2.warpPerspective(img2, M, (W, H))
-    img2_aligned = torch.from_numpy(img2_aligned).permute(2, 0, 1).to(img1)
-    img2_aligned = img2_aligned.unsqueeze(0)
-    # Mask out the black region in the aligned image
-    align_mask = np.ones((H, W), dtype=np.uint8)
-    align_mask = cv2.warpPerspective(align_mask, M, (W, H))
-    align_mask = torch.from_numpy(align_mask).unsqueeze(0).unsqueeze(0).bool()
-    align_mask = align_mask.to(img1.device)
+
+    img2_np = img2[0].permute(1, 2, 0).cpu().numpy()
+    img2_aligned = cv2.warpPerspective(img2_np, M, (W, H))
+    img2_aligned = torch.from_numpy(img2_aligned).permute(2, 0, 1).unsqueeze(0).to(img1.device)
+
+    align_mask_np = np.ones((H, W), dtype=np.uint8)
+    align_mask_np = cv2.warpPerspective(align_mask_np, M, (W, H))
+    align_mask = torch.from_numpy(align_mask_np).unsqueeze(0).unsqueeze(0).bool().to(img1.device)
+
     return img2_aligned, align_mask
+
 
 
 def batch_crop_resize(

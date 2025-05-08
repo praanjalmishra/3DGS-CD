@@ -1,0 +1,8 @@
+python nerfstudio/scripts/change_det.py --config data/Mustard/config.yml --transform data/Mustard/transforms.json --output data/Mustard/ --ckpt data/Mustard/nerfstudio_models/
+export PYTHONPATH=/local/home/pmishra/cvg/3dgscd/EfficientSAM:$PYTHONPATH
+
+
+python nerfstudio/scripts/change_det.py --config /local/home/pmishra/cvg/3dgscd/outputs/dlab_data_res/splatfacto/2025-05-05_120112/config.yml --transform data/dlab_data_res/transforms.json --output data/dlab_data_res --ckpt /local/home/pmishra/cvg/3dgscd/outputs/dlab_data_res/splatfacto/2025-05-05_120112/nerfstudio_models/
+
+
+https://excalidraw.com/#json=rWTxk3xotOnHIKDVaXghv,Pe6mrDvYSLg8fhyroRoy6w

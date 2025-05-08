@@ -73,7 +73,7 @@ class ChangeDet:
     """
     Export a 3D segmentation for a target object
     """
-    debug_dir = "/home/ziqi/Desktop/test/"
+    debug_dir = "/local/home/pmishra/cvg/3dgscd/debug/Mustard"
     """Directory to save debug output"""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     """Device"""
@@ -785,7 +785,7 @@ class ChangeDet:
         rgbs_captured_sparse_view = \
             color_images[sparse_view_indices].to(device)
         # Get sparse view camera parameters
-        cameras_sparse_view = cameras[torch.tensor(sparse_view_indices)]
+        cameras_sparse_view = cameras[torch.tensor(sparse_view_indices, dtype=torch.long)]
         cam_poses_sparse_view = c2w[sparse_view_indices]
         Ks_sparse_view = K[sparse_view_indices]
         dist_params_sparse_view = dist_params[sparse_view_indices]
