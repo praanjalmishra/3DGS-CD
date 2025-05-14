@@ -253,6 +253,50 @@ class ChangeDet:
         o3d.io.write_point_cloud(output_dir, pcd)
         print(f"[INFO] Saved point cloud to {output_dir}")
 
+    def project_points_to_image(self, points_3d, K, cam_pose, image_shape):
+        """
+        Project 3D points into 2D image space.
+
+        Args:
+            points_3d (np.ndarray): (N, 3) points in world frame
+            K (np.ndarray): (3, 3) camera intrinsics
+            cam_pose (np.ndarray): (4, 4) camera-to-world matrix
+            image_shape (tuple): (H, W) of the image
+
+        Returns:
+            projected_pts (np.ndarray): (M, 2) projected pixel coords
+        """
+        # Invert the camera pose to get world-to-camera
+        w2c = np.linalg.inv(cam_pose)
+        N = points_3d.shape[0]
+
+        # Convert to homogeneous
+        pts_h = np.concatenate([points_3d, np.ones((N, 1))], axis=1).T  # (4, N)
+        pts_cam = (w2c @ pts_h).T[:, :3]  # (N, 3)
+
+        # Remove points behind the camera
+        valid = pts_cam[:, 2] > 0
+        pts_cam = pts_cam[valid]
+
+        # Project to image plane
+        pts_2d = (K @ pts_cam.T).T  # (N, 3)
+        pts_2d = pts_2d[:, :2] / pts_2d[:, 2:3]
+
+        # Filter those falling inside the image
+        H, W = image_shape
+        x, y = pts_2d[:, 0], pts_2d[:, 1]
+        in_bounds = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+
+        return pts_2d[in_bounds].astype(np.int32)
+
+    def visualize_projection(self, image, points_2d, output_path):
+        vis = image.copy()
+        for x, y in points_2d:
+            cv2.circle(vis, (x, y), 2, (0, 255, 0), -1)
+        cv2.imwrite(output_path, vis)
+        print(f"[DEBUG] Saved projection overlay: {output_path}")
+
+
 
     def main(
         self, transforms_json=None, configs=None, checkpoint_dir=None,
@@ -388,6 +432,20 @@ class ChangeDet:
                 pts_cam = torch.stack([X, Y, Z, torch.ones_like(Z)], dim=1).T  # (4, N)
                 pts_world = (cam_pose @ pts_cam).T[:, :3]
                 points_changed_sparse.append(pts_world.cpu().numpy()) 
+
+                # 
+                image = rgbs_captured_sparse_view[ii].permute(1, 2, 0).cpu().numpy() * 255
+                image = image.astype(np.uint16)
+
+                # Load points for reprojection
+                points_2d = self.project_points_to_image(
+                    pts_world.cpu().numpy(), Ks_sparse_view[ii].cpu().numpy(),
+                    cam_poses_sparse_view[ii].cpu().numpy(),
+                    image.shape[:2]
+                )
+
+                self.visualize_projection(image, points_2d, self.debug_dir / f"projected_overlay_{ii:03d}.png")
+
 
         # debug
         print(f"[INFO] Extracted {len(points_changed_sparse)} 3D point clusters from masks.")
