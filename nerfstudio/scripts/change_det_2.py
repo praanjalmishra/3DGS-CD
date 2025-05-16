@@ -297,7 +297,6 @@ class ChangeDet:
         print(f"[DEBUG] Saved projection overlay: {output_path}")
 
 
-
     def main(
         self, transforms_json=None, configs=None, checkpoint_dir=None,
         refine_pose=True, debug=False
@@ -353,7 +352,7 @@ class ChangeDet:
         device = self.device
         # ----------------------------Load data -------------------------------
         # Load pre-training images and camera info + new images and camera info
-        color_images, img_fnames, c2w, K, dist_params, cameras = \
+        color_images, depth_images, img_fnames, c2w, K, dist_params, cameras = \
             read_transforms(transforms_json)
         # Undistort images
         assert dist_params.sum() < 1e-6, \
@@ -373,6 +372,9 @@ class ChangeDet:
         # Get sparse-view captured images
         rgbs_captured_sparse_view = \
             color_images[sparse_view_indices].to(device)
+
+        # Get sparse-view captured depths
+        depths_captured_sparse_view = depth_images.to(device)
         # Get sparse view camera parameters
         cameras_sparse_view = cameras[torch.tensor(sparse_view_indices, dtype=torch.long)]
         cam_poses_sparse_view = c2w[sparse_view_indices]
@@ -410,23 +412,61 @@ class ChangeDet:
             masks_changed_sparse_all.append(masks_changed_all)
 
             # depth
-            depth = depths_sparse_view[ii, 0] # (H, W)
+            depth = depths_captured_sparse_view[ii, 0].squeeze() # (H, W)
+            #depth = depths_sparse_view[ii, 0] # (H, W)
+
             k = Ks_sparse_view[ii] # (3, 3)
             cam_pose = cam_poses_sparse_view[ii]
 
             for m in range(masks_changed.shape[0]):
                 mask = masks_changed[m, 0].bool() # (H, W)
-                y, x = torch.where(mask)
-                z = depth[y, x]
+
+                # Resize mask to match depth resolution
+                mask_resized = torch.nn.functional.interpolate(
+                    mask.unsqueeze(0).unsqueeze(0).float(),  # Add batch and channel dims
+                    size=(depth.shape[0], depth.shape[1]),  # Match depth resolution
+                    mode='nearest'
+                ).squeeze().bool()
+                
+                # Get coordinates from resized mask
+                y, x = torch.where(mask_resized)
+                
+                # Get depth values
+                z = depth[y, x]  # This will work correctly now
+                # After getting the depth map
+                depth_stats = {
+                    "min": depth.min().item(),
+                    "max": depth.max().item(),
+                    "mean": depth.mean().item(),
+                    "median": torch.median(depth[depth > 0]).item() if (depth > 0).any() else 0,
+                    "non_zero_count": (depth > 0).sum().item()
+                }
+                print(f"Depth stats for view {ii}: {depth_stats}")
+                
+                # Filter valid depths
                 valid = z > 0
                 x, y, z = x[valid], y[valid], z[valid]
+                
                 if x.numel() == 0:
+                    print(f"No valid points found for mask {m} in view {ii}")
                     continue
+                    
+                # Calculate scaling to map back to original image coordinates if needed
+                scale_x = mask.shape[1] / depth.shape[1]  # Width ratio
+                scale_y = mask.shape[0] / depth.shape[0]  # Height ratio
+                
+                # Calculate camera coordinates
+                # Map pixel coordinates back to original resolution
+                x_orig = x.float() * scale_x
+                y_orig = y.float() * scale_y
+                
+                # Extract camera intrinsics
                 fx, fy = k[0, 0], k[1, 1]
                 cx, cy = k[0, 2], k[1, 2]
-
-                X = (x - cx) * z / fx
-                Y = (y - cy) * z / fy
+                
+                # Convert to camera coordinates
+                X = (x_orig - cx) * z / fx
+                Y = (y_orig - cy) * z / fy
                 Z = z
 
                 pts_cam = torch.stack([X, Y, Z, torch.ones_like(Z)], dim=1).T  # (4, N)
@@ -435,7 +475,7 @@ class ChangeDet:
 
                 # 
                 image = rgbs_captured_sparse_view[ii].permute(1, 2, 0).cpu().numpy() * 255
-                image = image.astype(np.uint16)
+                image = image.astype(np.uint8)
 
                 # Load points for reprojection
                 points_2d = self.project_points_to_image(
@@ -443,8 +483,11 @@ class ChangeDet:
                     cam_poses_sparse_view[ii].cpu().numpy(),
                     image.shape[:2]
                 )
-
-                self.visualize_projection(image, points_2d, self.debug_dir / f"projected_overlay_{ii:03d}.png")
+                
+                # Visualize the projection
+                self.visualize_projection(image, points_2d, self.debug_dir / f"projected_overlay_{ii}.png")
+                # Save the point cloud
+                self.save_pcds(pts_world.cpu().numpy(), self.debug_dir / f"changed_mask_{ii}_{m}.ply")
 
 
         # debug
@@ -453,16 +496,30 @@ class ChangeDet:
 
         all_changed_points = np.concatenate(points_changed_sparse, axis=0)
         if debug:
-            for idx, pts in enumerate(points_changed_sparse):
-                if pts.shape[0]== 0:
-                    continue
-                self.save_pcds(pts, self.debug_dir / f"changed_mask_{idx:03d}.ply")
+            # for idx, pts in enumerate(points_changed_sparse):
+            #     if pts.shape[0]== 0:
+            #         continue
+            #     self.save_pcds(pts, self.debug_dir / f"changed_mask_{idx:03d}.ply")
             
             # save depth map 
-            depths_np = depths_sparse_view.squeeze(1).cpu().numpy()
+            depths_np = depths_captured_sparse_view.squeeze(2).squeeze(1).cpu().numpy()  # Result shape: [4, 256, 192]
             for i, depth in enumerate(depths_np):
-                cv2.imwrite(str(self.debug_dir / f"depth_view_{i:03d}.png"),
-                    (depth / np.max(depth) * 65535).astype(np.uint16))
+                # Ensure we have valid depth values to avoid division by zero
+                depth_max = np.max(depth)
+                if depth_max > 0:
+                    normalized_depth = (depth / depth_max * 65535).astype(np.uint16)
+                else:
+                    normalized_depth = np.zeros_like(depth, dtype=np.uint16)
+                
+                # Save the depth map
+                cv2.imwrite(str(self.debug_dir / f"depth_view_{i:03d}.png"), normalized_depth)
+                
+                # Optional: Also save a color-mapped version for better visualization
+                depth_color = cv2.applyColorMap(
+                    (normalized_depth / 256).astype(np.uint8),  # Convert to 8-bit for color mapping
+                    cv2.COLORMAP_JET
+                )
+                cv2.imwrite(str(self.debug_dir / f"depth_view_color_{i:03d}.png"), depth_color)
 
 
         if debug:
