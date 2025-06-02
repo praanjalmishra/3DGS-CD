@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type, Union
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -242,6 +243,8 @@ class Splatfacto2ModelConfig(ModelConfig):
     camera_optimizer: CameraOptimizerConfig = field(default_factory=lambda: CameraOptimizerConfig(mode="off"))
     """Config of the camera optimizer to use"""
 
+    obj_mask_file: Optional[Path] = None
+
 
 class Splatfacto2Model(Model):
     """Nerfstudio's implementation of Gaussian Splatting
@@ -360,10 +363,10 @@ class Splatfacto2Model(Model):
                 dict[f"gauss_params.{p}"] = dict[p]
         if self.training:
             # Read object 3D segmentation mask
-            assert hasattr(self, "obj_3d_seg")
-            # self.obj_3d_seg = Object3DSeg.read_from_file(
-            #     self.config.obj_mask_file, device="cuda"
-            # )
+            #assert hasattr(self, "obj_3d_seg")
+            self.obj_3d_seg = Object3DSeg.read_from_file(
+                self.config.obj_mask_file, device="cuda"
+            )
             # corner1 = (1.8 / 11.0, 1.8 / 11.0, 2.02 / 11.0)
             # corner2 = (-1.8 / 11.0, -1.8 / 11.0, -2.02 / 11.0)
             # obj_mask = cube_mask(
@@ -846,7 +849,8 @@ class Splatfacto2Model(Model):
 
         # get the background color
         if self.training:
-            optimized_camera_to_world = self.camera_optimizer.apply_to_camera(camera)
+            self.camera_optimizer.apply_to_camera(camera) 
+            optimized_camera_to_world = camera.camera_to_worlds
             if self.config.background_color == "random":
                 background = torch.rand(3, device=self.device)
             elif self.config.background_color == "white":

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from typing import Dict, Union
+from pathlib import Path
 
 import tyro
 
@@ -712,6 +713,8 @@ method_configs["splatfacto2"] = TrainerConfig(
             cull_alpha_thresh=0.005,
             continue_cull_post_densification=False,
             camera_optimizer=CameraOptimizerConfig(mode="off"),
+            obj_mask_file=Path("/local/home/pmishra/cvg/3dgscd/debug/20250528_130305/obj3Dseg0.pt"),
+
         ),
     ),
     optimizers={
